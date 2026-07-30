@@ -20,6 +20,44 @@ export function parseTerms(text: string): ParsedSegment[] {
   return segments;
 }
 
+function matchFreeTerms(text: string, termList: string[]): ParsedSegment[] {
+  if (!termList.length) return [{ type: "text", content: text }];
+  const sorted = [...termList].sort((a, b) => b.length - a.length);
+  const escaped = sorted.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const regex = new RegExp(`(${escaped.join("|")})`, "gi");
+
+  const segments: ParsedSegment[] = [];
+  let lastIndex = 0;
+
+  for (const match of text.matchAll(regex)) {
+    if (match.index! > lastIndex) {
+      segments.push({ type: "text", content: text.slice(lastIndex, match.index!) });
+    }
+    segments.push({ type: "term", content: match[0] });
+    lastIndex = match.index! + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    segments.push({ type: "text", content: text.slice(lastIndex) });
+  }
+
+  return segments;
+}
+
+export function parseWithTermList(text: string, termList: string[]): ParsedSegment[] {
+  if (!termList.length) return parseTerms(text);
+  const afterBracket = parseTerms(text);
+  const result: ParsedSegment[] = [];
+  for (const seg of afterBracket) {
+    if (seg.type === "term") {
+      result.push(seg);
+    } else {
+      result.push(...matchFreeTerms(seg.content, termList));
+    }
+  }
+  return result;
+}
+
 export function annotateTerms(text: string, termList: string[]): string {
   if (!termList.length) return text;
 

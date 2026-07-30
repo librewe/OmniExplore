@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { DndContext, DragOverlay, type DragStartEvent, type DragEndEvent } from "@dnd-kit/core";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { TreeNode } from "./TreeNode";
@@ -26,6 +26,8 @@ interface RecursiveTreeProps {
   onEditSubmit: (nodeId: string) => void;
   onRenameSubmit: (nodeId: string, title: string) => void;
   onSelectionContextMenu: (e: React.MouseEvent, selectedText: string, nodeId: string) => void;
+  onTermHover?: (e: React.MouseEvent, term: string) => void;
+  onTermLeave?: () => void;
   termPreview: string | null;
   termPreviewAnchor: DOMRect | null;
   termPreviewTerm: string;
@@ -52,6 +54,8 @@ export function RecursiveTree({
   onEditSubmit,
   onRenameSubmit,
   onSelectionContextMenu,
+  onTermHover,
+  onTermLeave,
   termPreview,
   termPreviewAnchor,
   termPreviewTerm,
@@ -92,16 +96,22 @@ export function RecursiveTree({
 
   const [hoverTerm, setHoverTerm] = useState<string | null>(null);
   const [hoverAnchor, setHoverAnchor] = useState<DOMRect | null>(null);
+  const leaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
   const handleTermHover = useCallback((e: React.MouseEvent, term: string) => {
+    clearTimeout(leaveTimerRef.current);
     setHoverTerm(term);
     setHoverAnchor((e.target as HTMLElement).getBoundingClientRect());
-  }, []);
+    onTermHover?.(e, term);
+  }, [onTermHover]);
 
-  const handleTermLeave = useCallback(() => {
-    setHoverTerm(null);
-    setHoverAnchor(null);
-  }, []);
+  const handleTermLeaveLocal = useCallback(() => {
+    leaveTimerRef.current = setTimeout(() => {
+      setHoverTerm(null);
+      setHoverAnchor(null);
+      onTermLeave?.();
+    }, 200);
+  }, [onTermLeave]);
 
   return (
     <DndContext onDragStart={handleDragStart} onDragEnd={handleDragEndLocal}>
@@ -119,7 +129,7 @@ export function RecursiveTree({
             onTermDoubleClick={onTermDoubleClick}
             onTermContextMenu={onTermContextMenu}
             onTermHover={handleTermHover}
-            onTermLeave={handleTermLeave}
+            onTermLeave={handleTermLeaveLocal}
             onPlusSelect={onPlusSelect}
             onCreateEmptyChild={onCreateEmptyChild}
             onEditContent={onEditContent}
@@ -146,7 +156,9 @@ export function RecursiveTree({
             term={hoverTerm}
             preview={termPreview}
             anchorRect={hoverAnchor}
-            onClose={handleTermLeave}
+            onClose={handleTermLeaveLocal}
+            onMouseEnter={() => clearTimeout(leaveTimerRef.current)}
+            onMouseLeave={handleTermLeaveLocal}
           />
         )}
       </div>

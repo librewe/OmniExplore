@@ -1,3 +1,5 @@
+import { DEFAULT_INQUIRY_SYSTEM_PROMPT } from "@/lib/constants";
+
 const TERM_ANNOTATION_RULE = `
 【术语标注规则 - 必须遵守】
 - 对你回答中出现的所有专业术语/学科概念，用 [[术语名称]] 包裹
@@ -111,18 +113,32 @@ ${TERM_ANNOTATION_RULE}`,
 export function inquiryPrompt(
   parentTerm: string,
   childTerm: string,
-  question: string
+  question: string,
+  ancestors?: string[]
 ): { system: string; user: string } {
+  const customSystem = loadInquirySystemPrompt();
+  const systemPrompt = customSystem || DEFAULT_INQUIRY_SYSTEM_PROMPT;
+  const filled = systemPrompt
+    .replace(/\$\{parentTerm\}/g, parentTerm)
+    .replace(/\$\{childTerm\}/g, childTerm);
+  const ancestorCtx = ancestors?.length
+    ? `\n概念路径: ${ancestors.join(" > ")} > ${parentTerm}`
+    : "";
   return {
-    system: `你是认知解释专家。用户对父概念"${parentTerm}"中的一个子概念产生疑问。
-请用通俗易懂的语言解释，注意在父概念语境下。
-遵循以下规则：
-1. 结合父概念"${parentTerm}"的语境，解释"${childTerm}"在这个上下文中的含义
-2. 用日常类比，让外行也能理解
-3. 回答控制在 150 字以内
-${TERM_ANNOTATION_RULE}`,
+    system: `${filled}${ancestorCtx}\n${TERM_ANNOTATION_RULE}`,
     user: `在"${parentTerm}"的语境下，${question}`,
   };
+}
+
+export function loadInquirySystemPrompt(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem("inquiry_system_prompt");
+  } catch { return null; }
+}
+
+export function saveInquirySystemPrompt(prompt: string) {
+  localStorage.setItem("inquiry_system_prompt", prompt);
 }
 
 export function guideMapGenPrompt(term: string): { system: string; user: string } {

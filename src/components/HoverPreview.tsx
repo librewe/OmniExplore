@@ -1,25 +1,25 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import { HOVER_PREVIEW_DELAY_MS } from "@/lib/constants";
 
 interface HoverPreviewProps {
   term: string;
   preview: string | null;
   anchorRect: DOMRect | null;
   onClose: () => void;
+  onMouseEnter?: () => void;
+  onMouseLeave?: () => void;
 }
 
-export function HoverPreview({ term, preview, anchorRect, onClose }: HoverPreviewProps) {
+export function HoverPreview({ term, preview, anchorRect, onClose, onMouseEnter, onMouseLeave }: HoverPreviewProps) {
   const [visible, setVisible] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!preview) return;
-    timerRef.current = setTimeout(() => setVisible(true), HOVER_PREVIEW_DELAY_MS);
+    timerRef.current = setTimeout(() => setVisible(true), 80);
     return () => clearTimeout(timerRef.current);
-  }, [preview, term]);
+  }, [term]);
 
   useEffect(() => {
     if (!visible) return;
@@ -28,7 +28,9 @@ export function HoverPreview({ term, preview, anchorRect, onClose }: HoverPrevie
     return () => document.removeEventListener("click", handleClick);
   }, [visible, onClose]);
 
-  if (!visible || !preview || !anchorRect) return null;
+  if (!visible || !anchorRect) return null;
+
+  const display = preview || "双击跳转查看";
 
   const style: React.CSSProperties = {
     position: "fixed",
@@ -42,10 +44,15 @@ export function HoverPreview({ term, preview, anchorRect, onClose }: HoverPrevie
     <div
       ref={ref}
       style={style}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
       className="animate-fade-in rounded-lg border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-lg"
     >
-      <div className="font-medium text-primary mb-0.5">{term}</div>
-      <div className="text-muted-foreground text-xs line-clamp-2">{preview}</div>
+      {preview ? (
+        <div className="text-muted-foreground text-xs line-clamp-1">{display}</div>
+      ) : (
+        <div className="text-muted-foreground text-xs">{display}</div>
+      )}
     </div>
   );
 }

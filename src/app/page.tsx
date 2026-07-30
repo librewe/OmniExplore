@@ -2,22 +2,24 @@
 
 import { useEffect, useReducer, useState, useCallback, useRef } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { TermListContext } from "@/lib/TermListContext";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { WorkGroupSwitcher } from "@/components/WorkGroupSwitcher";
 import { RecursiveTree } from "@/components/RecursiveTree";
 import { InputBar } from "@/components/InputBar";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { PreviewPanel } from "@/components/PreviewPanel";
-import { GuideMap } from "@/components/GuideMap";
+import { GuideMapCanvas } from "@/components/GuideMapCanvas";
 import { TermLibrary } from "@/components/TermLibrary";
 import { Onboarding } from "@/components/Onboarding";
 import { treeReducer, getInitialTreeState, buildRootNode } from "@/store/treeStore";
 import { footprintReducer, initialState as initialFootprint } from "@/store/footprintStore";
 import { initializeConfig, useConfigStore } from "@/store/configStore";
-import { getConceptNode, putConceptNode, getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG } from "@/services/cache";
+import { getConceptNode, getConceptNodeByTerm, putConceptNode, getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG } from "@/services/cache";
 import { streamLLM, LLMError } from "@/services/llm";
 import { getPresetPrompt, inquiryPrompt } from "@/services/prompts";
 import { extractTitle } from "@/lib/utils";
-import { DEFAULT_INQUIRY_TEMPLATES, getPresetPrefix } from "@/lib/constants";
+import { DEFAULT_INQUIRY_TEMPLATES, DEFAULT_SELECTION_TEMPLATES, getPresetPrefix } from "@/lib/constants";
 import type {
   TreeNodeData,
   ConceptNode,
@@ -78,6 +80,7 @@ export default function Home() {
     setAllTerms(Array.from(all));
   }, [termList]);
   const [plusMenuItems, setPlusMenuItems] = useState<PlusMenuItem[]>([]);
+  const [selectionMenuItems, setSelectionMenuItems] = useState<PlusMenuItem[]>([]);
   const [recentInputs, setRecentInputs] = useState<string[]>([]);
 
   const [showGuideMap, setShowGuideMap] = useState(false);
@@ -86,10 +89,19 @@ export default function Home() {
   const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
   const [navHistory, setNavHistory] = useState<string[]>([]);
   const [navIndex, setNavIndex] = useState(-1);
+  const [backOpen, setBackOpen] = useState(false);
+  const [fwdOpen, setFwdOpen] = useState(false);
   const skipHistoryRef = useRef(false);
   const navStoreRef = useRef<Map<string, { history: string[]; index: number }>>(new Map());
 
   const [previewTitle, setPreviewTitle] = useState("");
+  const [leftWidth, setLeftWidth] = useState(288);
+  const [rightWidth, setRightWidth] = useState(288);
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [hoverTermPreview, setHoverTermPreview] = useState<string | null>(null);
+  const [hoverTermPreviewTerm, setHoverTermPreviewTerm] = useState("");
+  const [hoverTermPreviewAnchor, setHoverTermPreviewAnchor] = useState<DOMRect | null>(null);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
 
   const streamingMapRef = useRef<Map<string, AbortController>>(new Map());
@@ -158,6 +170,13 @@ export default function Home() {
       setPlusMenuItems(buildDefaultPlusMenu());
     }
 
+    const savedSelMenu = localStorage.getItem("selection_menu_items");
+    if (savedSelMenu) {
+      try { setSelectionMenuItems(JSON.parse(savedSelMenu)); } catch {}
+    } else {
+      setSelectionMenuItems(DEFAULT_SELECTION_TEMPLATES);
+    }
+
     const savedHistory = localStorage.getItem("input_history");
     if (savedHistory) {
       try { setRecentInputs(JSON.parse(savedHistory)); } catch {}
@@ -175,12 +194,35 @@ export default function Home() {
     localStorage.setItem("plus_menu_items", JSON.stringify(items));
   }, []);
 
+  const saveSelectionMenu = useCallback((items: PlusMenuItem[]) => {
+    setSelectionMenuItems(items);
+    localStorage.setItem("selection_menu_items", JSON.stringify(items));
+  }, []);
+
   const termListKey = `term_list_${activeGroupId || "default"}`;
 
   const saveTermList = useCallback((terms: string[]) => {
     setTermList(terms);
     localStorage.setItem(termListKey, JSON.stringify(terms));
-  }, [termListKey]);
+    if (activeGroupId) {
+      const group = workGroups.find((g) => g.id === activeGroupId);
+      if (group?.guide_map) {
+        const filterTerms = (n: GuideMapNode): GuideMapNode | null => {
+          if (n.term && !n._group && !terms.some((t) => t.toLowerCase() === n.term.toLowerCase())) return null;
+          const filtered = n.children.map(filterTerms).filter((c): c is GuideMapNode => c !== null);
+          return { ...n, children: filtered };
+        };
+        const result = filterTerms(group.guide_map);
+        if (result) {
+          group.guide_map = result;
+          group.updated_at = Date.now();
+          putWorkGroup(group).then(() => {
+            setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+          });
+        }
+      }
+    }
+  }, [termListKey, activeGroupId, workGroups]);
 
   const addToTermList = useCallback(
     (term: string) => {
@@ -318,7 +360,11 @@ export default function Home() {
       addToTermList(term);
 
       if (!skipHistoryRef.current) {
-        setNavHistory((prev) => { const next = prev.slice(0, navIndex + 1); next.push(term); return next; });
+        setNavHistory((prev) => {
+          const next = prev.slice(0, navIndex + 1);
+          if (next[next.length - 1] !== term) next.push(term);
+          return next;
+        });
         setNavIndex((prev) => prev + 1);
       }
       skipHistoryRef.current = false;
@@ -478,9 +524,23 @@ export default function Home() {
       dispatchTree({ type: "ADD_CHILD", parentId, child: childNode });
 
       if (config) {
-        const rootNode = findNode(parentId);
-        const parentTerm = rootNode?.term || treeState.rootTerm;
-        const { system, user } = inquiryPrompt(parentTerm, treeState.rootTerm, text);
+        const parentIdActual = treeState.activeTag.parentId;
+        const parentNode = parentIdActual && parentIdActual !== "root" ? findNode(parentIdActual) : treeState.rootNode;
+        const parentTerm = parentNode?.term || treeState.rootTerm;
+
+        const ancestors: string[] = [];
+        let ancestorId = parentNode?.parentId;
+        while (ancestorId) {
+          const an = findNode(ancestorId);
+          if (an) {
+            ancestors.unshift(an.term || an.title);
+            ancestorId = an.parentId;
+          } else {
+            break;
+          }
+        }
+
+        const { system, user } = inquiryPrompt(parentTerm, treeState.rootTerm, text, ancestors);
         handleStream(childId, config, system, user, (content) => {
           const fullContent = text + "\n" + content;
           dispatchTree({ type: "SET_NODE_CONTENT", nodeId: childId, content: fullContent });
@@ -531,31 +591,47 @@ export default function Home() {
   const handleTermContextMenu = useCallback(
     (e: React.MouseEvent, term: string) => {
       const menu = document.createElement("div");
-      menu.className = "fixed z-50 min-w-[180px] rounded-md border bg-popover p-1 shadow-md animate-in fade-in-0 zoom-in-95";
+      menu.className = "fixed z-50 min-w-[180px] rounded-md border bg-popover p-1 shadow-md";
       menu.style.left = `${e.clientX}px`;
       menu.style.top = `${e.clientY}px`;
-      menu.innerHTML = `
-        <button class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent" data-action="focus">
-          <span>🎯</span> <span>设为焦点</span>
-        </button>
-      `;
 
-      document.body.appendChild(menu);
+      const focusBtn = document.createElement("button");
+      focusBtn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
+      focusBtn.innerHTML = "<span>🎯</span> <span>聚焦</span>";
+      focusBtn.onclick = () => { menu.remove(); handleFocusTerm(term); };
+      menu.appendChild(focusBtn);
 
-      menu.querySelector("[data-action='focus']")?.addEventListener("click", () => {
+      const inquireBtn = document.createElement("button");
+      inquireBtn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
+      inquireBtn.innerHTML = "<span>💬</span> <span>追问</span>";
+      inquireBtn.onclick = () => {
         menu.remove();
-        handleFocusTerm(term);
+        setFillValue(`${term}？`);
+      };
+      menu.appendChild(inquireBtn);
+
+      selectionMenuItems.forEach((item) => {
+        const btn = document.createElement("button");
+        btn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
+        btn.innerHTML = `<span>💬</span> <span>${item.label}</span>`;
+        btn.onclick = () => {
+          menu.remove();
+          const rootTerm = treeState.rootTerm;
+          const label = item.prompt
+            .replace(/\$\{selected\}/g, term)
+            .replace(/\$\{root\}/g, rootTerm);
+          setFillValue(label);
+        };
+        menu.appendChild(btn);
       });
 
+      document.body.appendChild(menu);
       const close = (ev: MouseEvent) => {
-        if (!menu.contains(ev.target as Node)) {
-          menu.remove();
-          document.removeEventListener("click", close);
-        }
+        if (!menu.contains(ev.target as Node)) { menu.remove(); document.removeEventListener("click", close); }
       };
       setTimeout(() => document.addEventListener("click", close), 0);
     },
-    [handleFocusTerm]
+    [handleFocusTerm, selectionMenuItems, treeState.rootTerm]
   );
 
   const handleSelectionContextMenu = useCallback(
@@ -571,14 +647,27 @@ export default function Home() {
       focusBtn.onclick = () => { menu.remove(); handleFocusTerm(selectedText); };
       menu.appendChild(focusBtn);
 
-      plusMenuItems.forEach((item) => {
+      const inquireBtn = document.createElement("button");
+      inquireBtn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
+      inquireBtn.innerHTML = "<span>💬</span> <span>追问</span>";
+      inquireBtn.onclick = () => {
+        menu.remove();
+        dispatchTree({ type: "SET_ACTIVE_TAG", parentId: nodeId, title: findNode(nodeId)?.title || "" });
+        setFillValue(`${selectedText}？`);
+      };
+      menu.appendChild(inquireBtn);
+
+      selectionMenuItems.forEach((item) => {
         const btn = document.createElement("button");
         btn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
-        btn.innerHTML = `<span>${item.label}</span>`;
+        btn.innerHTML = `<span>💬</span> <span>${item.label}</span>`;
         btn.onclick = () => {
           menu.remove();
           const node = findNode(nodeId);
-          const label = item.prompt.replace(/\$\{term\}/g, selectedText);
+          const rootTerm = treeState.rootTerm;
+          const label = item.prompt
+            .replace(/\$\{selected\}/g, selectedText)
+            .replace(/\$\{root\}/g, rootTerm);
           dispatchTree({ type: "SET_ACTIVE_TAG", parentId: nodeId, title: node?.title || "" });
           setFillValue(label);
         };
@@ -591,8 +680,40 @@ export default function Home() {
       };
       setTimeout(() => document.addEventListener("click", close), 0);
     },
-    [handleFocusTerm, plusMenuItems, findNode]
+    [handleFocusTerm, selectionMenuItems, findNode, treeState.rootTerm]
   );
+
+  const handleTermHover = useCallback(
+    async (e: React.MouseEvent, term: string) => {
+      const rect = (e.target as HTMLElement).getBoundingClientRect();
+      setHoverTermPreviewAnchor(rect);
+      setHoverTermPreviewTerm(term);
+      try {
+        const id = SparkMD5.hash(term.toLowerCase());
+        const node = (await getConceptNode(id)) ?? (await getConceptNodeByTerm(term));
+        if (node) {
+          const raw =
+            node.micro_intuition ||
+            node.micro_definition ||
+            node.micro_application ||
+            node.micro_motivation ||
+            node.custom_qa?.find((q) => q.answer)?.answer;
+          const preview = raw ? raw.replace(/^[^\n]*\n/, "").slice(0, 120) : null;
+          setHoverTermPreview(preview);
+        } else {
+          setHoverTermPreview(null);
+        }
+      } catch {
+        setHoverTermPreview(null);
+      }
+    },
+    []
+  );
+
+  const handleTermLeave = useCallback(() => {
+    setHoverTermPreview(null);
+    setHoverTermPreviewAnchor(null);
+  }, []);
 
   const handlePlusSelect = useCallback(
     (parentId: string, promptTemplate: string) => {
@@ -884,29 +1005,45 @@ export default function Home() {
     [activeGroupId, workGroups]
   );
 
+  const handleAddGuideMapNode = useCallback(
+    async (term: string) => {
+      if (!activeGroupId || !term.trim()) return;
+      const group = workGroups.find((g) => g.id === activeGroupId);
+      if (!group) return;
+      if (!group.guide_map) {
+        group.guide_map = { term: "", children: [{ term: "", children: [{ term: term.trim(), children: [] }], _group: true }] };
+      } else if (group.guide_map.term) {
+        group.guide_map = { term: "", children: [group.guide_map, { term: "", children: [{ term: term.trim(), children: [] }], _group: true }] };
+      } else {
+        const lower = term.trim().toLowerCase();
+        const exists = group.guide_map.children.some((c) =>
+          c.term === "" ? c.children.some((cc) => cc.term.toLowerCase() === lower) : c.term.toLowerCase() === lower
+        );
+        if (!exists) {
+          group.guide_map.children.push({ term: "", children: [{ term: term.trim(), children: [] }], _group: true });
+        }
+      }
+      group.updated_at = Date.now();
+      await putWorkGroup(group);
+      setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+    },
+    [activeGroupId, workGroups]
+  );
+
   const ensureGuideMap = useCallback(async () => {
-    if (!treeState.rootTerm || !activeGroupId) return;
+    if (!activeGroupId) return;
     const group = workGroups.find((g) => g.id === activeGroupId);
     if (!group) return;
     if (!group.guide_map) {
-      group.guide_map = { term: treeState.rootTerm, children: [] };
-    } else {
-      const exists = (n: GuideMapNode): boolean =>
-        n.term === treeState.rootTerm || n.children.some(exists);
-      if (!exists(group.guide_map)) {
-        if (group.guide_map.term) {
-          group.guide_map = { term: "", children: [group.guide_map, { term: treeState.rootTerm, children: [] }] };
-        } else {
-          group.guide_map.children.push({ term: treeState.rootTerm, children: [] });
-        }
-      }
+      group.guide_map = { term: "", children: [] };
+      group.updated_at = Date.now();
+      await putWorkGroup(group);
+      setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
     }
-    group.updated_at = Date.now();
-    await putWorkGroup(group);
-    setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
-  }, [treeState.rootTerm, activeGroupId, workGroups]);
+  }, [activeGroupId, workGroups]);
 
   const lastMapClickRef = useRef<{ term: string; time: number } | null>(null);
+  const guideFocusRef = useRef<number[]>([]);
 
   const handleGuideMapNodeClick = useCallback(
     async (term: string) => {
@@ -967,11 +1104,10 @@ export default function Home() {
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (!showGuideMap && treeState.rootNode) {
+        if (showGuideMap) return;
+        if (treeState.rootNode) {
           ensureGuideMap();
           setShowGuideMap(true);
-        } else if (showGuideMap) {
-          setShowGuideMap(false);
         }
       }
       if (e.altKey && e.key === "ArrowLeft" && navIndex > 0) {
@@ -997,13 +1133,43 @@ export default function Home() {
 
   const hasRoot = !!treeState.rootNode;
 
+  const handleResizeStart = useCallback((onResize: (delta: number) => void) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    let lastX = e.clientX;
+    const onMove = (ev: MouseEvent) => {
+      const delta = ev.clientX - lastX;
+      lastX = ev.clientX;
+      onResize(delta);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, []);
+
   return (
+    <TermListContext.Provider value={termList}>
     <TooltipProvider delayDuration={200}>
       <div className="flex h-screen overflow-hidden">
-        <aside className="w-72 shrink-0 border-r bg-background flex flex-col">
-          <div className="px-4 py-2 border-b">
-            <span className="font-bold text-base">🌳 OmniExplore</span>
-          </div>
+        {!leftCollapsed && (
+          <>
+            <aside style={{ width: leftWidth }} className="shrink-0 border-r bg-background flex flex-col">
+              <div className="px-4 py-2 border-b flex items-center justify-between">
+                <span className="font-bold text-base">🌳 OmniExplore</span>
+                <button
+                  onClick={() => setLeftCollapsed(true)}
+                  className="p-0.5 rounded hover:bg-accent text-muted-foreground"
+                  title="收起侧栏"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+                </button>
+              </div>
           <WorkGroupSwitcher
             groups={workGroups}
             activeGroupId={activeGroupId}
@@ -1035,30 +1201,93 @@ export default function Home() {
               onTermDelete={(term) => saveTermList(termList.filter((t) => t !== term))}
               plusMenuItems={plusMenuItems}
               onPlusMenuItemsChange={savePlusMenu}
+              selectionMenuItems={selectionMenuItems}
+              onSelectionMenuItemsChange={saveSelectionMenu}
             />
           </div>
-        </aside>
+            </aside>
+            <div
+              className="w-1 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 shrink-0 transition-colors"
+              onMouseDown={handleResizeStart((delta) => setLeftWidth((w) => Math.min(400, Math.max(180, w + delta))))}
+            />
+          </>
+        )}
+        {leftCollapsed && (
+          <div className="w-10 shrink-0 border-r bg-background flex flex-col items-center py-2 gap-3">
+            <button
+              onClick={() => setLeftCollapsed(false)}
+              className="p-0.5 rounded hover:bg-accent text-muted-foreground"
+              title="展开侧栏"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+            </button>
+          </div>
+        )}
 
-        <main className="flex-1 flex flex-col min-w-0 border-r">
+        <main className="flex-1 flex flex-col min-w-0">
           <header className="flex items-center px-4 py-2 border-b shrink-0">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-1">
               <div className="flex items-center gap-0.5">
-                <button
-                  disabled={navIndex <= 0}
-                  onClick={() => { if (navIndex > 0) { skipHistoryRef.current = true; setNavIndex(navIndex - 1); handleFocusTerm(navHistory[navIndex - 1]); } }}
-                  className="p-0.5 rounded hover:bg-accent disabled:opacity-30 transition-colors"
-                  title="Alt+← 后退"
-                >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
-                </button>
-                <button
-                  disabled={navIndex >= navHistory.length - 1}
-                  onClick={() => { if (navIndex < navHistory.length - 1) { skipHistoryRef.current = true; setNavIndex(navIndex + 1); handleFocusTerm(navHistory[navIndex + 1]); } }}
-                  className="p-0.5 rounded hover:bg-accent disabled:opacity-30 transition-colors"
-                  title="Alt+→ 前进"
-                >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
-                </button>
+                <Popover open={backOpen} onOpenChange={setBackOpen}>
+                  <PopoverTrigger asChild>
+                    <button
+                      disabled={navIndex <= 0}
+                      className="p-0.5 rounded hover:bg-accent disabled:opacity-30 transition-colors"
+                      title="Alt+← 后退"
+                    >
+                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-48 max-h-60 overflow-auto" align="start">
+                    {navHistory.slice(0, navIndex).filter(t => t !== (navHistory[navIndex] || "")).reverse().map((term, i) => (
+                      <button
+                        key={`${term}-${i}`}
+                        className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent truncate"
+                        onClick={() => {
+                          setBackOpen(false);
+                          skipHistoryRef.current = true;
+                          setNavIndex(navIndex - 1 - i);
+                          handleFocusTerm(term);
+                        }}
+                      >
+                        {term}
+                      </button>
+                    ))}
+                    {navIndex <= 0 && (
+                      <p className="px-2 py-4 text-sm text-muted-foreground text-center">无历史</p>
+                    )}
+                  </PopoverContent>
+                </Popover>
+                <Popover open={fwdOpen} onOpenChange={setFwdOpen}>
+                  <PopoverTrigger asChild>
+                    <button
+                      disabled={navIndex >= navHistory.length - 1}
+                      className="p-0.5 rounded hover:bg-accent disabled:opacity-30 transition-colors"
+                      title="Alt+→ 前进"
+                    >
+                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-48 max-h-60 overflow-auto" align="start">
+                    {navHistory.slice(navIndex + 1).map((term, i) => (
+                      <button
+                        key={`${term}-${i}`}
+                        className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent truncate"
+                        onClick={() => {
+                          setFwdOpen(false);
+                          skipHistoryRef.current = true;
+                          setNavIndex(navIndex + 1 + i);
+                          handleFocusTerm(term);
+                        }}
+                      >
+                        {term}
+                      </button>
+                    ))}
+                    {navIndex >= navHistory.length - 1 && (
+                      <p className="px-2 py-4 text-sm text-muted-foreground text-center">已是最新</p>
+                    )}
+                  </PopoverContent>
+                </Popover>
               </div>
               <span className="font-semibold text-base">{activeGroup?.name || "OmniExplore"}</span>
               {showGuideMap && (
@@ -1066,18 +1295,68 @@ export default function Home() {
                   导图模式 · Esc 返回
                 </span>
               )}
+              <div className="flex-1" />
+              <button
+                onClick={() => setRightCollapsed(!rightCollapsed)}
+                className="p-0.5 rounded hover:bg-accent text-muted-foreground"
+                title={rightCollapsed ? "展开预览面板" : "收起预览面板"}
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  {rightCollapsed
+                    ? <><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="15" y1="3" x2="15" y2="21"/></>
+                    : <><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="15" y1="3" x2="15" y2="21"/></>
+                  }
+                </svg>
+              </button>
             </div>
           </header>
 
-          <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-1 flex flex-col min-h-0 max-w-3xl mx-auto w-full">
             {showGuideMap ? (
-              <GuideMap
+              <GuideMapCanvas
                 guideMap={activeGroup?.guide_map ?? null}
+                initialFocusPath={guideFocusRef.current}
                 onNodeClick={handleGuideMapNodeClick}
                 termList={termList}
                 currentFocusTerm={treeState.rootTerm}
                 onUpdate={handleGuideMapUpdate}
                 onBack={() => setShowGuideMap(false)}
+                onFocusPathChange={(path) => { guideFocusRef.current = path; }}
+                onRebuild={async (scopePath: number[]) => {
+                  if (!activeGroupId) return;
+                  const group = workGroups.find((g) => g.id === activeGroupId);
+                  if (!group?.guide_map) return;
+                  if (scopePath.length === 0) {
+                    group.guide_map = { term: "", children: termList.map((t) => ({ term: t, children: [] as GuideMapNode[] })) };
+                  } else {
+                    let node: GuideMapNode | undefined;
+                    if (group.guide_map.term === "") {
+                      node = group.guide_map.children[scopePath[0]];
+                      for (let i = 1; i < scopePath.length && node; i++) node = node.children[scopePath[i]];
+                    } else {
+                      node = group.guide_map;
+                      for (let i = 0; i < scopePath.length && node; i++) node = node.children[scopePath[i]];
+                    }
+                    if (node) {
+                      const terms: string[] = [];
+                      const seen = new Set<string>();
+                      function collect(n: GuideMapNode) {
+                        if (n.children.length > 0 || n.term === "") {
+                          n.children.forEach(collect);
+                        } else if (n.term && !seen.has(n.term.toLowerCase())) {
+                          seen.add(n.term.toLowerCase());
+                          terms.push(n.term);
+                        }
+                      }
+                      node.children.forEach(collect);
+                      node.children = terms.map((t) => ({ term: t, children: [] as GuideMapNode[] }));
+                      group.guide_map = JSON.parse(JSON.stringify(group.guide_map));
+                    }
+                  }
+                  group.updated_at = Date.now();
+                  await putWorkGroup(group);
+                  setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+                }}
               />
             ) : hasRoot ? (
               <RecursiveTree
@@ -1099,10 +1378,12 @@ export default function Home() {
                 onEditSubmit={handleEditSubmit}
                 onRenameSubmit={handleRenameSubmit}
                 onSelectionContextMenu={handleSelectionContextMenu}
-                termPreview={null}
-                termPreviewAnchor={null}
-                termPreviewTerm=""
-                onTermPreviewClose={() => {}}
+                onTermHover={handleTermHover}
+                onTermLeave={handleTermLeave}
+                termPreview={hoverTermPreview}
+                termPreviewAnchor={hoverTermPreviewAnchor}
+                termPreviewTerm={hoverTermPreviewTerm}
+                onTermPreviewClose={handleTermLeave}
                 plusItems={plusMenuItems}
               />
             ) : (
@@ -1118,18 +1399,34 @@ export default function Home() {
                 tagPrefix={showGuideMap ? "" : undefined}
                 fillValue={fillValue}
               onFocus={(text) => { setFillValue(""); handleFocusTerm(text); }}
-              onCreateChild={(text) => { setFillValue(""); handleCreateChild(text); }}
+              onCreateChild={(text) => {
+                setFillValue("");
+                if (showGuideMap) {
+                  handleAddGuideMapNode(text);
+                } else {
+                  handleCreateChild(text);
+                }
+              }}
             />
           </div>
         </main>
 
+        {!rightCollapsed && (
+          <>
+            <div
+              className="w-1 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 shrink-0 transition-colors"
+              onMouseDown={handleResizeStart((delta) => setRightWidth((w) => Math.min(500, Math.max(200, w - delta))))}
+            />
+            <div style={{ width: rightWidth }} className="shrink-0">
         <PreviewPanel
           termName={previewTitle}
           content={previewContent}
-          onTermDoubleClick={handleTermDoubleClick}
-          onTermContextMenu={handleTermContextMenu}
         />
+            </div>
+          </>
+        )}
       </div>
     </TooltipProvider>
+    </TermListContext.Provider>
   );
 }

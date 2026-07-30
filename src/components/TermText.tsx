@@ -1,7 +1,9 @@
 "use client";
 
 import { memo, useCallback } from "react";
-import { parseTerms } from "@/services/termParser";
+import { parseTerms, parseWithTermList } from "@/services/termParser";
+import { useTermList } from "@/lib/TermListContext";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 import { cn } from "@/lib/utils";
 
 interface TermTextProps {
@@ -21,7 +23,8 @@ export const TermText = memo(function TermText({
   onTermLeave,
   className,
 }: TermTextProps) {
-  const segments = parseTerms(content);
+  const termList = useTermList();
+  const segments = termList.length ? parseWithTermList(content, termList) : parseTerms(content);
 
   const handleDoubleClick = useCallback(
     (term: string) => (e: React.MouseEvent) => {
@@ -51,7 +54,7 @@ export const TermText = memo(function TermText({
     <span className={cn("text-sm leading-relaxed", className)}>
       {segments.map((seg, i) => {
         if (seg.type === "text") {
-          return <span key={i}>{seg.content}</span>;
+          return <MarkdownRenderer key={i} content={seg.content} inline />;
         }
         return (
           <span

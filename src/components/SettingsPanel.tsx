@@ -9,9 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { testConnection } from "@/services/llm";
 import { loadCustomPresetPrompts, saveCustomPresetPrompts } from "@/services/prompts";
-import { intuitionPrompt, definitionPrompt, applicationPrompt, motivationPrompt } from "@/services/prompts";
+import { intuitionPrompt, definitionPrompt, applicationPrompt, motivationPrompt, loadInquirySystemPrompt, saveInquirySystemPrompt } from "@/services/prompts";
 import { useConfigStore } from "@/store/configStore";
-import { DEFAULT_LLM_CONFIG, DEFAULT_INQUIRY_TEMPLATES } from "@/lib/constants";
+import { DEFAULT_LLM_CONFIG, DEFAULT_INQUIRY_SYSTEM_PROMPT } from "@/lib/constants";
 import type { LLMConfig } from "@/types";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +20,8 @@ interface SettingsPanelProps {
   onTermDelete: (term: string) => void;
   plusMenuItems: Array<{ id: string; label: string; prompt: string }>;
   onPlusMenuItemsChange: (items: Array<{ id: string; label: string; prompt: string }>) => void;
+  selectionMenuItems: Array<{ id: string; label: string; prompt: string }>;
+  onSelectionMenuItemsChange: (items: Array<{ id: string; label: string; prompt: string }>) => void;
 }
 
 export function SettingsPanel({
@@ -27,6 +29,8 @@ export function SettingsPanel({
   onTermDelete,
   plusMenuItems,
   onPlusMenuItemsChange,
+  selectionMenuItems,
+  onSelectionMenuItemsChange,
 }: SettingsPanelProps) {
   const { config, isConfigured, setConfig } = useConfigStore();
   const [open, setOpen] = useState(false);
@@ -47,10 +51,20 @@ export function SettingsPanel({
   const [editMenuPrompt, setEditMenuPrompt] = useState("");
   const [newMenuLabel, setNewMenuLabel] = useState("");
   const [newMenuPrompt, setNewMenuPrompt] = useState("");
+  const [editingSelItem, setEditingSelItem] = useState<string | null>(null);
+  const [editSelLabel, setEditSelLabel] = useState("");
+  const [editSelPrompt, setEditSelPrompt] = useState("");
+  const [newSelLabel, setNewSelLabel] = useState("");
+  const [newSelPrompt, setNewSelPrompt] = useState("");
   const [presetOverrides, setPresetOverrides] = useState<Record<string, { system: string; user: string }>>({});
   const [editingPreset, setEditingPreset] = useState<string | null>(null);
   const [editPresetSystem, setEditPresetSystem] = useState("");
   const [editPresetUser, setEditPresetUser] = useState("");
+
+  const [inquirySystemPrompt, setInquirySystemPrompt] = useState(
+    loadInquirySystemPrompt() || DEFAULT_INQUIRY_SYSTEM_PROMPT
+  );
+  const [inquirySaved, setInquirySaved] = useState(false);
 
   const handleSave = useCallback(() => {
     const cfg: LLMConfig = {
@@ -126,7 +140,8 @@ export function SettingsPanel({
           <TabsList className="flex flex-col h-full w-32 shrink-0 rounded-none border-r bg-muted/50 p-2 gap-1 justify-start">
             <TabsTrigger value="llm" className="w-full justify-start text-sm">LLM 连接</TabsTrigger>
             <TabsTrigger value="presets" className="w-full justify-start text-sm">预设提示词</TabsTrigger>
-            <TabsTrigger value="templates" className="w-full justify-start text-sm">菜单模板</TabsTrigger>
+            <TabsTrigger value="templates" className="w-full justify-start text-sm">新建菜单</TabsTrigger>
+            <TabsTrigger value="selmenu" className="w-full justify-start text-sm">划词菜单</TabsTrigger>
             <TabsTrigger value="terms" className="w-full justify-start text-sm">术语库</TabsTrigger>
           </TabsList>
 
@@ -267,7 +282,7 @@ export function SettingsPanel({
             <TabsContent value="templates" className="p-6 m-0">
               <div className="space-y-4">
                 <p className="text-sm text-muted-foreground">
-                  配置 + 菜单中的追问模板。${"${term}"} 占位符在运行时替换为节点名称。
+                  配置 + 菜单中的追问模板。{'${term}'} 占位符在运行时替换为节点名称。
                 </p>
 
                 {plusMenuItems.map((item) => (
@@ -365,6 +380,137 @@ export function SettingsPanel({
                     }}
                   >
                     添加
+                  </Button>
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="selmenu" className="p-6 m-0">
+              <div className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  配置划词右键菜单中的追问模板。{"${selected}"} 替换为选中文本，{"${root}"} 替换为当前根术语。
+                </p>
+
+                {selectionMenuItems.map((item) => (
+                  <div key={item.id} className="border rounded-md p-3">
+                    {editingSelItem === item.id ? (
+                      <div className="space-y-2">
+                        <Input
+                          value={editSelLabel}
+                          onChange={(e) => setEditSelLabel(e.target.value)}
+                          placeholder="菜单名称"
+                          className="text-sm"
+                        />
+                        <Input
+                          value={editSelPrompt}
+                          onChange={(e) => setEditSelPrompt(e.target.value)}
+                          placeholder={"提示词（用 ${selected} / ${root} 占位）"}
+                          className="text-sm"
+                        />
+                        <div className="flex gap-2">
+                          <Button size="sm" onClick={() => {
+                            const updated = selectionMenuItems.map((x) =>
+                              x.id === item.id ? { ...x, label: editSelLabel, prompt: editSelPrompt } : x
+                            );
+                            onSelectionMenuItemsChange(updated);
+                            setEditingSelItem(null);
+                          }}>
+                            保存
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={() => setEditingSelItem(null)}>
+                            取消
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium truncate">{item.label}</p>
+                          <p className="text-xs text-muted-foreground truncate">{item.prompt}</p>
+                        </div>
+                        <div className="flex gap-1 shrink-0 ml-2">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              setEditingSelItem(item.id);
+                              setEditSelLabel(item.label);
+                              setEditSelPrompt(item.prompt);
+                            }}
+                          >
+                            编辑
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => {
+                              onSelectionMenuItemsChange(selectionMenuItems.filter((x) => x.id !== item.id));
+                            }}
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-destructive" />
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+
+                <Separator />
+
+                <div className="space-y-2">
+                  <p className="text-sm font-medium">新建模板</p>
+                  <Input
+                    value={newSelLabel}
+                    onChange={(e) => setNewSelLabel(e.target.value)}
+                    placeholder="菜单名称"
+                    className="text-sm"
+                  />
+                  <Input
+                    value={newSelPrompt}
+                    onChange={(e) => setNewSelPrompt(e.target.value)}
+                    placeholder={"提示词（用 ${selected} / ${root} 占位）"}
+                    className="text-sm"
+                  />
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      if (!newSelLabel.trim()) return;
+                      const newItem = {
+                        id: `sel_${Date.now()}`,
+                        label: newSelLabel.trim(),
+                        prompt: newSelPrompt.trim() || "这里的${selected}指什么？",
+                      };
+                      onSelectionMenuItemsChange([...selectionMenuItems, newItem]);
+                      setNewSelLabel("");
+                      setNewSelPrompt("");
+                    }}
+                  >
+                    添加
+                  </Button>
+                </div>
+
+                <Separator />
+
+                <div className="space-y-2">
+                  <p className="text-sm font-medium">追问 System Prompt</p>
+                  <p className="text-xs text-muted-foreground">
+                    追问时的系统提示词。{'${parentTerm}'} = 父术语，{'${childTerm}'} = 子术语。
+                    自动追加术语标注规则。
+                  </p>
+                  <textarea
+                    value={inquirySystemPrompt}
+                    onChange={(e) => setInquirySystemPrompt(e.target.value)}
+                    className="w-full h-32 rounded border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring resize-y"
+                  />
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      saveInquirySystemPrompt(inquirySystemPrompt);
+                      setInquirySaved(true);
+                      setTimeout(() => setInquirySaved(false), 2000);
+                    }}
+                  >
+                    {inquirySaved ? "已保存 ✓" : "保存"}
                   </Button>
                 </div>
               </div>

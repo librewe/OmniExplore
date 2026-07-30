@@ -69,7 +69,7 @@ export function InputBar({
         {tagLabel && (
           <div className="inline-flex items-center gap-1 rounded-t-md bg-primary/10 text-primary px-2 py-0.5 text-xs mb-1">
             <CornerDownLeft className="w-3 h-3" />
-            <span>{tagPrefix || "追加到"} {tagLabel}</span>
+            <span>{tagPrefix !== undefined ? tagPrefix : "追加到"} {tagLabel}</span>
           </div>
         )}
         <div className="flex items-center gap-2">

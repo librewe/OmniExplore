@@ -44,6 +44,7 @@ export interface WorkGroup {
 export interface GuideMapNode {
   term: string;
   children: GuideMapNode[];
+  _group?: boolean;
 }
 
 export interface PathNode {
