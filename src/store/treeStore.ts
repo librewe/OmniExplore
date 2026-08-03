@@ -23,7 +23,8 @@ export type TreeAction =
   | { type: "SET_SELECTED"; nodeId: string | null }
   | { type: "SET_ACTIVE_TAG"; parentId: string; title: string }
   | { type: "REPLACE_NODE"; nodeId: string; node: TreeNodeData }
-  | { type: "APPEND_STREAMING"; nodeId: string; chunk: string };
+  | { type: "APPEND_STREAMING"; nodeId: string; chunk: string }
+  | { type: "REORDER_CHILDREN"; parentId: string; childIds: string[] };
 
 function findNode(root: TreeNodeData, nodeId: string): TreeNodeData | null {
   if (root.id === nodeId) return root;
@@ -58,14 +59,13 @@ function buildPresetChildren(term: string, mode: ViewMode): TreeNodeData[] {
   return getPresetsForMode(mode).map((def) => ({
     id: `preset:${def.key}`,
     type: "preset" as const,
-    title: def.label,
+    title: `${def.icon} ${def.label}`,
     term,
     content: null,
     status: "idle" as NodeStatus,
-    presetKey: def.key,
-    expanded: def.defaultExpanded,
+    expanded: false,
     children: [],
-    parentId: null,
+    parentId: "root",
   }));
 }
 
@@ -178,6 +178,18 @@ export function treeReducer(state: TreeState, action: TreeAction): TreeState {
           children: [...node.children, { ...action.child, parentId: action.parentId }],
           expanded: true,
         })),
+      };
+
+    case "REORDER_CHILDREN":
+      if (!state.rootNode) return state;
+      return {
+        ...state,
+        rootNode: updateNode(state.rootNode, action.parentId, (node) => {
+          const byId = new Map(node.children.map((c) => [c.id, c]));
+          const ordered = action.childIds.map((id) => byId.get(id)!).filter(Boolean);
+          const remaining = node.children.filter((c) => !action.childIds.includes(c.id));
+          return { ...node, children: [...ordered, ...remaining] };
+        }),
       };
 
     case "REMOVE_NODE":

@@ -58,6 +58,21 @@ function getNodeByPath(root: GuideMapNode, path: NodePath): GuideMapNode | null 
   return current;
 }
 
+export function buildBreadcrumbItems(
+  guideMap: GuideMapNode | null,
+  focusPath: NodePath
+): { label: string; path: NodePath }[] {
+  if (!guideMap || focusPath.length === 0) return [];
+  const items: { label: string; path: NodePath }[] = [];
+  const startAt = guideMap.term === "" ? 0 : -1;
+  if (startAt === -1) items.push({ label: guideMap.term, path: [] });
+  for (let i = 0; i < focusPath.length; i++) {
+    const node = getNodeByPath(guideMap, focusPath.slice(0, i + 1));
+    items.push({ label: node?.term ?? "?", path: focusPath.slice(0, i + 1) });
+  }
+  return items;
+}
+
 function removeNodeByPath(tree: GuideMapNode, path: NodePath): { tree: GuideMapNode; removed: GuideMapNode | null } {
   const newTree = cloneTree(tree);
   if (path.length === 0) return { tree: newTree, removed: null };
@@ -129,13 +144,14 @@ function replaceAtPath(tree: GuideMapNode, path: NodePath, newNode: GuideMapNode
 interface GuideMapCanvasProps {
   guideMap: GuideMapNode | null;
   initialFocusPath?: NodePath;
-  onNodeClick: (term: string) => void;
+  onNodeClick: (term: string, nodePath?: NodePath) => void;
   termList: string[];
   currentFocusTerm: string;
   onUpdate: (node: GuideMapNode) => void;
   onBack: () => void;
   onRebuild?: (scopePath: NodePath) => void;
   onFocusPathChange?: (path: NodePath) => void;
+  onNavigate?: (focusPath: NodePath, pathStr: string) => void;
 }
 
 export function GuideMapCanvas({
@@ -148,16 +164,53 @@ export function GuideMapCanvas({
   onBack,
   onRebuild,
   onFocusPathChange,
+  onNavigate,
 }: GuideMapCanvasProps) {
   const [focusPath, setFocusPath] = useState<NodePath>([]);
   const didRestoreRef = useRef(false);
+  const focusPathRef = useRef<NodePath>([]);
+  useEffect(() => { focusPathRef.current = focusPath; }, [focusPath]);
 
   useEffect(() => {
-    if (!didRestoreRef.current && initialFocusPath && initialFocusPath.length > 0) {
+    if (!didRestoreRef.current) {
       didRestoreRef.current = true;
-      setFocusPath(initialFocusPath);
+      if (initialFocusPath && initialFocusPath.length > 0) {
+        setFocusPath(initialFocusPath);
+      }
+      return;
+    }
+    const ip = initialFocusPath ?? [];
+    if (ip.length !== focusPathRef.current.length || ip.some((v, i) => v !== focusPathRef.current[i])) {
+      setFocusPath(ip);
     }
   }, [initialFocusPath]);
+  const navigatedRef = useRef(false);
+  useEffect(() => {
+    if (!navigatedRef.current) { navigatedRef.current = true; return; }
+    if (!onNavigate) return;
+    const parts: string[] = ["根"];
+    if (focusPath.length > 0 && guideMap) {
+      for (let i = 0; i < focusPath.length; i++) {
+        const node = getNodeByPath(guideMap, focusPath.slice(0, i + 1));
+        parts.push(node?.term || "?");
+      }
+    }
+    onNavigate(focusPath, parts.join(">"));
+  }, [focusPath]);
+
+  useEffect(() => {
+    if (!guideMap || focusPath.length === 0) return;
+    for (let len = focusPath.length; len >= 0; len--) {
+      const testPath = focusPath.slice(0, len);
+      if (testPath.length === 0) { setFocusPath([]); return; }
+      const node = getNodeByPath(guideMap, testPath);
+      if (node) {
+        if (testPath.length !== focusPath.length) setFocusPath(testPath);
+        return;
+      }
+    }
+    setFocusPath([]);
+  }, [guideMap, focusPath]);
   const [selectedPath, setSelectedPath] = useState<NodePath | null>(null);
   const selectedPathRef = useRef<NodePath | null>(null);
   const [editingNodePath, setEditingNodePath] = useState<string | null>(null);
@@ -173,17 +226,7 @@ export function GuideMapCanvas({
     return getNodeByPath(guideMap, focusPath);
   }, [guideMap, focusPath]);
 
-  const breadcrumb = useMemo(() => {
-    if (!guideMap || focusPath.length === 0) return [];
-    const items: { label: string; path: NodePath }[] = [];
-    const startAt = guideMap.term === "" ? 0 : -1;
-    if (startAt === -1) items.push({ label: guideMap.term, path: [] });
-    for (let i = 0; i < focusPath.length; i++) {
-      const node = getNodeByPath(guideMap, focusPath.slice(0, i + 1));
-      items.push({ label: node?.term ?? "?", path: focusPath.slice(0, i + 1) });
-    }
-    return items;
-  }, [guideMap, focusPath]);
+  const breadcrumb = useMemo(() => buildBreadcrumbItems(guideMap, focusPath), [guideMap, focusPath]);
 
   const visibleNodes = useMemo((): GuideMapNode[] => {
     if (!guideMap) return [];
@@ -290,22 +333,14 @@ export function GuideMapCanvas({
       const path = idToPath(event.active.id as string);
       const node = guideMap ? getNodeByPath(guideMap, path) : null;
       if (node) setDragNode({ term: node.term });
-      if (typeof window !== "undefined") (window as unknown as Record<string,unknown>).__dndDebug = "started";
     },
     [guideMap]
-  );
-
-  const handleDragMove = useCallback(
-    (event: DragMoveEvent) => {
-      console.log("DRAG OVER:", event.over?.id);
-      setDebugOver(event.over?.id as string || "null");
-    },
-    []
   );
 
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {
       setDragNode(null);
+      if (!guideMap) return;
       const { active, over } = event;
       const sourcePath = idToPath(active.id as string);
 
@@ -371,11 +406,11 @@ export function GuideMapCanvas({
 
       const lastTime = lastClickMapRef.current.get(id);
       if (lastTime && now - lastTime < 500) {
-        if (hasChildren) {
-          handleFocus(path);
-        } else {
-          onNodeClick(term);
-        }
+          if (hasChildren) {
+            handleFocus(path);
+          } else {
+            onNodeClick(term, path);
+          }
         lastClickMapRef.current.set(id, 0);
         return;
       }
@@ -386,9 +421,9 @@ export function GuideMapCanvas({
         return;
       }
 
-      setSelectedPath(path);
-      selectedPathRef.current = path;
-      onNodeClick(term);
+        setSelectedPath(path);
+        selectedPathRef.current = path;
+        onNodeClick(term, path);
       lastClickMapRef.current.set(id, now);
     },
     [onNodeClick, handleFocus]
@@ -616,7 +651,7 @@ function NodeCard({
 
           {isAdding && (
             <div className="px-3 pb-2" onClick={(e) => e.stopPropagation()}>
-              <Input value={newChildText} onChange={(e) => onNewChildChange(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") onCommitAdd(); if (e.key === "Escape") { setAddingToPath(null); onCommitAdd(); } }} onBlur={() => onCommitAdd()} placeholder="新节点名称" className="h-7 text-xs" autoFocus />
+              <Input value={newChildText} onChange={(e) => onNewChildChange(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") onCommitAdd(); if (e.key === "Escape") onCommitAdd(); }} onBlur={() => onCommitAdd()} placeholder="新节点名称" className="h-7 text-xs" autoFocus />
             </div>
           )}
 
@@ -633,7 +668,6 @@ function NodeCard({
                   onStartEdit={onStartEdit} onEditChange={onEditChange} onCommitEdit={onCommitEdit}
                   addingToPath={addingToPath} newChildText={newChildText}
                   onStartAdd={onStartAdd} onNewChildChange={onNewChildChange} onCommitAdd={onCommitAdd}
-                  onDissolveGroup={onDissolveGroup}
                 />
               ))}
             </div>

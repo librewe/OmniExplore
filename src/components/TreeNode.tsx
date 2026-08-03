@@ -37,6 +37,8 @@ interface TreeNodeProps {
   onEditingChange: (nodeId: string, value: string) => void;
   onEditSubmit: (nodeId: string) => void;
   onRenameSubmit: (nodeId: string, title: string) => void;
+  dropIndicator?: { type: "inside"; nodeId: string } | { type: "between"; neighborId: string; before: boolean } | null;
+  registerNodeRect?: (id: string, el: HTMLElement | null) => void;
 }
 
 const STATUS_ICONS: Record<NodeStatus, React.ReactNode> = {
@@ -132,6 +134,8 @@ export function TreeNode({
   onEditingChange,
   onEditSubmit,
   onRenameSubmit,
+  dropIndicator,
+  registerNodeRect,
 }: TreeNodeProps) {
   const isSelected = selectedNodeId === node.id;
   const isRoot = node.type === "root";
@@ -171,6 +175,17 @@ export function TreeNode({
     id: node.id, disabled: !isDraggable,
   });
   const { setNodeRef: setDropRef, isOver } = useDroppable({ id: node.id });
+  const handleRef = useCallback((el: HTMLDivElement | null) => {
+    setDropRef(el);
+    registerNodeRect?.(node.id, el);
+  }, [node.id, setDropRef, registerNodeRect]);
+  const isDropTarget = dropIndicator && (
+    (dropIndicator.type === "inside" && dropIndicator.nodeId === node.id) ||
+    (dropIndicator.type === "between" && dropIndicator.neighborId === node.id)
+  );
+  const isDropInside = dropIndicator?.type === "inside" && dropIndicator.nodeId === node.id;
+  const isDropBefore = dropIndicator?.type === "between" && dropIndicator.neighborId === node.id && dropIndicator.before;
+  const isDropAfter = dropIndicator?.type === "between" && dropIndicator.neighborId === node.id && !dropIndicator.before;
   const dragStyle = transform ? {
     transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
   } : undefined;
@@ -184,11 +199,12 @@ export function TreeNode({
   return (
     <div className="select-none" style={{ paddingLeft: depth * 20 }}>
       <div
-        ref={setDropRef}
+        ref={handleRef}
         className={cn(
-          "tree-node-row group flex items-start gap-1 py-0.5 rounded-md transition-colors cursor-default",
+          "tree-node-row group flex items-start gap-1 py-0.5 rounded-md transition-colors cursor-default relative",
           isSelected && "tree-node-selected",
-          isOver && "ring-1 ring-primary/30 bg-accent/30"
+          isOver && "ring-1 ring-primary/30 bg-accent/30",
+          isDropInside && "ring-2 ring-primary bg-primary/5"
         )}
         style={dragStyle}
         onClick={handleClick}
@@ -197,13 +213,19 @@ export function TreeNode({
           handleContextMenu(e);
         }}
       >
+        {isDropBefore && (
+          <div className="absolute -top-0.5 left-2 right-2 h-0.5 bg-primary rounded-full" />
+        )}
+        {isDropAfter && (
+          <div className="absolute -bottom-0.5 left-2 right-2 h-0.5 bg-primary rounded-full" />
+        )}
         <div className="flex items-center gap-0.5 shrink-0 pt-0.5">
           {isDraggable ? (
             <div ref={setDragRef} {...listeners} {...attributes} className="drag-handle shrink-0 cursor-grab active:cursor-grabbing mt-0.5 touch-none">
               <GripVertical className="w-3 h-3 text-muted-foreground" />
             </div>
           ) : (
-            <div className="shrink-0 w-[15px] mt-0.5" />
+            <div className="shrink-0 w-3 mt-0.5" />
           )}
 
           {node.children.length > 0 || node.content !== null || node.type === "preset" ? (
@@ -245,6 +267,10 @@ export function TreeNode({
                   "text-base font-medium truncate shrink-0",
                   isRoot ? "text-primary font-semibold" : "text-foreground"
                 )}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  if (!isRoot) onEditContent(node.id);
+                }}
               >
                 {node.title}
               </span>
@@ -347,6 +373,8 @@ export function TreeNode({
             onEditingChange={onEditingChange}
             onEditSubmit={onEditSubmit}
             onRenameSubmit={onRenameSubmit}
+            dropIndicator={dropIndicator}
+            registerNodeRect={registerNodeRect}
           />
         ))}
 

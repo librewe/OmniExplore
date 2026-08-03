@@ -96,3 +96,12 @@ export interface PlusMenuItem {
   label: string;
   prompt: string;
 }
+
+export interface StoredFile {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  data: string;
+  created_at: number;
+}

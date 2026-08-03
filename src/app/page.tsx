@@ -9,16 +9,19 @@ import { RecursiveTree } from "@/components/RecursiveTree";
 import { InputBar } from "@/components/InputBar";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { PreviewPanel } from "@/components/PreviewPanel";
-import { GuideMapCanvas } from "@/components/GuideMapCanvas";
+import { GuideMapCanvas, buildBreadcrumbItems } from "@/components/GuideMapCanvas";
 import { TermLibrary } from "@/components/TermLibrary";
+import { FilesList } from "@/components/FilesList";
+import { PDFViewer } from "@/components/PDFViewer";
 import { Onboarding } from "@/components/Onboarding";
 import { treeReducer, getInitialTreeState, buildRootNode } from "@/store/treeStore";
 import { footprintReducer, initialState as initialFootprint } from "@/store/footprintStore";
 import { initializeConfig, useConfigStore } from "@/store/configStore";
-import { getConceptNode, getConceptNodeByTerm, putConceptNode, getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG } from "@/services/cache";
+import { getConceptNode, getConceptNodeByTerm, putConceptNode, getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG, getAllFiles, putFile, deleteFile } from "@/services/cache";
 import { streamLLM, LLMError } from "@/services/llm";
 import { getPresetPrompt, inquiryPrompt } from "@/services/prompts";
-import { extractTitle } from "@/lib/utils";
+import { extractTitle, cn } from "@/lib/utils";
+import { Layers, ChevronRight, Search, Plus } from "lucide-react";
 import { DEFAULT_INQUIRY_TEMPLATES, DEFAULT_SELECTION_TEMPLATES, getPresetPrefix } from "@/lib/constants";
 import type {
   TreeNodeData,
@@ -27,6 +30,7 @@ import type {
   GuideMapNode,
   PlusMenuItem,
   CustomQA,
+  StoredFile,
 } from "@/types";
 import SparkMD5 from "spark-md5";
 
@@ -53,6 +57,21 @@ function buildCustomQA(template: {
 }
 
 export default function Home() {
+  type NavEntry =
+    | { type: "tree"; term: string }
+    | { type: "guideMap"; pathStr: string; focusPath: number[] };
+
+  function navEntryLabel(e: NavEntry): string {
+    return e.type === "tree" ? e.term : `[导图] ${e.pathStr}`;
+  }
+  function navEntryEq(a: NavEntry, b: NavEntry): boolean {
+    if (!a || !b) return false;
+    if (a.type !== b.type) return false;
+    if (a.type === "tree" && b.type === "tree") return a.term === b.term;
+    if (a.type === "guideMap" && b.type === "guideMap") return a.pathStr === b.pathStr;
+    return false;
+  }
+
   const isInitialized = useRef(false);
 
   const [treeState, dispatchTree] = useReducer(treeReducer, getInitialTreeState());
@@ -87,12 +106,15 @@ export default function Home() {
   const [fillValue, setFillValue] = useState<string>("");
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
-  const [navHistory, setNavHistory] = useState<string[]>([]);
+  const [navHistory, setNavHistory] = useState<NavEntry[]>([]);
   const [navIndex, setNavIndex] = useState(-1);
   const [backOpen, setBackOpen] = useState(false);
   const [fwdOpen, setFwdOpen] = useState(false);
   const skipHistoryRef = useRef(false);
-  const navStoreRef = useRef<Map<string, { history: string[]; index: number }>>(new Map());
+  const navStoreRef = useRef<Map<string, { history: NavEntry[]; index: number }>>(new Map());
+  const navIndexRef = useRef(-1);
+  useEffect(() => { navIndexRef.current = navIndex; }, [navIndex]);
+  const navPushedRef = useRef(false);
 
   const [previewTitle, setPreviewTitle] = useState("");
   const [leftWidth, setLeftWidth] = useState(288);
@@ -103,6 +125,28 @@ export default function Home() {
   const [hoverTermPreviewTerm, setHoverTermPreviewTerm] = useState("");
   const [hoverTermPreviewAnchor, setHoverTermPreviewAnchor] = useState<DOMRect | null>(null);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [leftTab, setLeftTab] = useState<"terms" | "files">("terms");
+  const [storedFiles, setStoredFiles] = useState<StoredFile[]>([]);
+  const [sidebarSearch, setSidebarSearch] = useState("");
+  const [activePdf, setActivePdf] = useState<StoredFile | null>(null);
+  const prevRightRef = useRef(288);
+
+  useEffect(() => {
+    if (activePdf) {
+      prevRightRef.current = rightWidth;
+      setRightCollapsed(false);
+      setRightWidth(Math.max(400, window.innerWidth * 0.45));
+    } else {
+      setRightWidth(prevRightRef.current);
+    }
+  }, [activePdf]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2000);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   const streamingMapRef = useRef<Map<string, AbortController>>(new Map());
   const expandedNodesRef = useRef<Map<string, Set<string>>>(new Map());
@@ -155,6 +199,8 @@ export default function Home() {
         if (t) { try { setTermList(JSON.parse(t)); } catch {} }
       }
     });
+
+    getAllFiles().then(setStoredFiles);
 
     const savedTerms = localStorage.getItem(`term_list_${activeGroupId || "default"}`);
     if (savedTerms) {
@@ -359,14 +405,16 @@ export default function Home() {
       addRecentInput(term);
       addToTermList(term);
 
-      if (!skipHistoryRef.current) {
-        setNavHistory((prev) => {
-          const next = prev.slice(0, navIndex + 1);
-          if (next[next.length - 1] !== term) next.push(term);
-          return next;
-        });
-        setNavIndex((prev) => prev + 1);
-      }
+        if (!skipHistoryRef.current) {
+          const entry: NavEntry = { type: "tree", term };
+          navPushedRef.current = false;
+          setNavHistory((prev) => {
+            const next = prev.slice(0, navIndex + 1);
+            if (next.length === 0 || !navEntryEq(next[next.length - 1], entry)) { next.push(entry); navPushedRef.current = true; }
+            return next;
+          });
+          setNavIndex((prev) => navPushedRef.current ? prev + 1 : prev);
+        }
       skipHistoryRef.current = false;
 
       dispatchFootprint({ type: "APPEND", term, nodeId: SparkMD5.hash(term.toLowerCase()) });
@@ -582,11 +630,11 @@ export default function Home() {
   );
 
   const handleTermDoubleClick = useCallback(
-    (term: string) => {
-      handleFocusTerm(term);
-    },
-    [handleFocusTerm]
-  );
+      (term: string) => {
+        handleFocusTerm(term);
+      },
+      [handleFocusTerm]
+    );
 
   const handleTermContextMenu = useCallback(
     (e: React.MouseEvent, term: string) => {
@@ -854,7 +902,7 @@ export default function Home() {
   );
 
   const handleDragEnd = useCallback(
-    (sourceId: string, targetId: string) => {
+    (sourceId: string, targetId: string, position: "before" | "inside" | "after") => {
       const s = findNode(sourceId);
       const t = findNode(targetId);
       if (!s || !t || sourceId === targetId) return;
@@ -863,12 +911,64 @@ export default function Home() {
         return p.children.some((c) => isDesc(c, cid));
       }
       if (isDesc(s, targetId)) return;
-      dispatchTree({ type: "REMOVE_NODE", nodeId: sourceId });
-      dispatchTree({ type: "ADD_CHILD", parentId: targetId, child: { ...s, parentId: targetId } });
-      getConceptNode(SparkMD5.hash(s.term.toLowerCase())).then((existing) => {
-        if (existing) {
+
+      const id = SparkMD5.hash(s.term.toLowerCase());
+      getConceptNode(id).then((existing) => {
+        if (!existing) return;
+        if (position === "inside") {
+          dispatchTree({ type: "REMOVE_NODE", nodeId: sourceId });
+          dispatchTree({ type: "ADD_CHILD", parentId: targetId, child: { ...s, parentId: targetId } });
           const qa = existing.custom_qa.find((q) => q.id === sourceId);
           if (qa) { qa.parent_node_id = targetId; existing.updated_at = Date.now(); putConceptNode(existing); }
+        } else {
+          const newParentId = t.parentId!;
+          if (s.parentId === newParentId) {
+            const srcIdx = existing.custom_qa.findIndex((q) => q.id === sourceId);
+            const tgtIdx = existing.custom_qa.findIndex((q) => q.id === targetId);
+            if (srcIdx !== -1 && tgtIdx !== -1) {
+              const [moved] = existing.custom_qa.splice(srcIdx, 1);
+              const newTgtIdx = existing.custom_qa.findIndex((q) => q.id === targetId);
+              existing.custom_qa.splice(position === "before" ? newTgtIdx : newTgtIdx + 1, 0, moved);
+              existing.updated_at = Date.now();
+              putConceptNode(existing);
+            }
+          } else {
+            const srcIdx = existing.custom_qa.findIndex((q) => q.id === sourceId);
+            if (srcIdx !== -1) {
+              const [moved] = existing.custom_qa.splice(srcIdx, 1);
+              moved.parent_node_id = newParentId;
+              let beforeCount = 0;
+              for (const q of existing.custom_qa) {
+                if (q.parent_node_id === newParentId) {
+                  if (q.id === targetId) { if (position === "after") beforeCount++; break; }
+                  beforeCount++;
+                }
+              }
+              let insertAt = existing.custom_qa.length;
+              let count = 0;
+              for (let i = 0; i < existing.custom_qa.length; i++) {
+                if (existing.custom_qa[i].parent_node_id === newParentId) {
+                  if (count === beforeCount) { insertAt = i; break; }
+                  count++;
+                }
+              }
+              existing.custom_qa.splice(insertAt, 0, moved);
+              existing.updated_at = Date.now();
+              putConceptNode(existing);
+            }
+            dispatchTree({ type: "REMOVE_NODE", nodeId: sourceId });
+            dispatchTree({ type: "ADD_CHILD", parentId: newParentId, child: { ...s, parentId: newParentId } });
+          }
+          const parentNode = findNode(newParentId);
+          if (parentNode) {
+            const childIds = parentNode.children.map((c) => c.id);
+            const filtered = childIds.filter((cid) => cid !== sourceId);
+            const ins = filtered.indexOf(targetId);
+            if (ins !== -1) {
+              filtered.splice(position === "before" ? ins : ins + 1, 0, sourceId);
+              dispatchTree({ type: "REORDER_CHILDREN", parentId: newParentId, childIds: filtered });
+            }
+          }
         }
       });
     },
@@ -910,6 +1010,19 @@ export default function Home() {
       const node = findNode(nodeId);
       if (node?.content) {
         dispatchTree({ type: "SET_NODE_TITLE", nodeId, title: extractTitle(node.content) });
+      }
+      if (node && (node.type === "inquiry" || node.type === "reference")) {
+        const id = SparkMD5.hash(node.term.toLowerCase());
+        getConceptNode(id).then((existing) => {
+          if (existing) {
+            const qa = existing.custom_qa.find((q: { id: string; answer?: string }) => q.id === nodeId);
+            if (qa) {
+              qa.answer = node.content ?? "";
+              existing.updated_at = Date.now();
+              putConceptNode(existing);
+            }
+          }
+        });
       }
       setEditingNodeId(null);
     },
@@ -1006,26 +1119,49 @@ export default function Home() {
   );
 
   const handleAddGuideMapNode = useCallback(
-    async (term: string) => {
+    async (term: string, path: number[] = []) => {
       if (!activeGroupId || !term.trim()) return;
       const group = workGroups.find((g) => g.id === activeGroupId);
       if (!group) return;
-      if (!group.guide_map) {
-        group.guide_map = { term: "", children: [{ term: "", children: [{ term: term.trim(), children: [] }], _group: true }] };
-      } else if (group.guide_map.term) {
-        group.guide_map = { term: "", children: [group.guide_map, { term: "", children: [{ term: term.trim(), children: [] }], _group: true }] };
-      } else {
+      const newChild: GuideMapNode = { term: term.trim(), children: [] };
+      const newTree = group.guide_map ? structuredClone(group.guide_map) : { term: "", children: [] as GuideMapNode[] };
+
+      let added = false;
+      if (path.length === 0) {
         const lower = term.trim().toLowerCase();
-        const exists = group.guide_map.children.some((c) =>
+        const exists = newTree.children.some((c) =>
           c.term === "" ? c.children.some((cc) => cc.term.toLowerCase() === lower) : c.term.toLowerCase() === lower
         );
         if (!exists) {
-          group.guide_map.children.push({ term: "", children: [{ term: term.trim(), children: [] }], _group: true });
+          newTree.children.push({ term: "", children: [newChild], _group: true });
+          added = true;
+        }
+      } else {
+        let parent: GuideMapNode;
+        if (newTree.term === "") {
+          parent = newTree.children[path[0]];
+          for (let i = 1; i < path.length && parent; i++) parent = parent.children[path[i]];
+        } else {
+          parent = newTree;
+          for (let i = 0; i < path.length && parent; i++) parent = parent.children[path[i]];
+        }
+        if (parent) {
+          const lower = term.trim().toLowerCase();
+          const exists = parent.children.some((c) => c.term.toLowerCase() === lower);
+          if (!exists) {
+            parent.children.push(newChild);
+            added = true;
+          }
         }
       }
-      group.updated_at = Date.now();
-      await putWorkGroup(group);
-      setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+      if (added) {
+        group.guide_map = newTree;
+        group.updated_at = Date.now();
+        await putWorkGroup(group);
+        setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+      } else {
+        setToast(`"${term.trim()}" 已存在于当前图层`);
+      }
     },
     [activeGroupId, workGroups]
   );
@@ -1043,13 +1179,15 @@ export default function Home() {
   }, [activeGroupId, workGroups]);
 
   const lastMapClickRef = useRef<{ term: string; time: number } | null>(null);
-  const guideFocusRef = useRef<number[]>([]);
+  const [guideFocusPath, setGuideFocusPath] = useState<number[]>([]);
 
   const handleGuideMapNodeClick = useCallback(
-    async (term: string) => {
+    async (term: string, nodePath?: number[]) => {
       const now = Date.now();
       const last = lastMapClickRef.current;
       if (last && last.term === term && now - last.time < 600) {
+        const parentPath = nodePath ? nodePath.slice(0, -1) : guideFocusPath;
+        setGuideFocusPath(parentPath);
         handleFocusTerm(term);
         setShowGuideMap(false);
         lastMapClickRef.current = null;
@@ -1085,8 +1223,22 @@ export default function Home() {
         }
       }
     },
-    [handleFocusTerm]
+    [handleFocusTerm, guideFocusPath]
   );
+
+  const handleGuideMapNavigate = useCallback((focusPath: number[], pathStr: string) => {
+      const entry: NavEntry = { type: "guideMap", pathStr, focusPath };
+      const idx = navIndexRef.current;
+      navPushedRef.current = false;
+      setNavHistory((prev) => {
+        const next = prev.slice(0, idx + 1);
+        if (next.length > 0 && navEntryEq(next[next.length - 1], entry)) return prev;
+        next.push(entry);
+        navPushedRef.current = true;
+        return next;
+      });
+      setNavIndex((prev) => navPushedRef.current ? prev + 1 : prev);
+    }, []);
 
   const handleGuideMapUpdate = useCallback(
     async (node: GuideMapNode) => {
@@ -1106,24 +1258,48 @@ export default function Home() {
       if (e.key === "Escape") {
         if (showGuideMap) return;
         if (treeState.rootNode) {
+            const entry: NavEntry = { type: "guideMap", pathStr: "根", focusPath: guideFocusPath };
+            navPushedRef.current = false;
+            setNavHistory((prev) => {
+              const next = prev.slice(0, navIndex + 1);
+              if (next.length === 0 || !navEntryEq(next[next.length - 1], entry)) { next.push(entry); navPushedRef.current = true; }
+              return next;
+            });
+            setNavIndex((prev) => navPushedRef.current ? prev + 1 : prev);
           ensureGuideMap();
           setShowGuideMap(true);
         }
       }
-      if (e.altKey && e.key === "ArrowLeft" && navIndex > 0) {
-        e.preventDefault();
-        skipHistoryRef.current = true;
-        setNavIndex(navIndex - 1);
-        handleFocusTerm(navHistory[navIndex - 1]);
-      }
-      if (e.altKey && e.key === "ArrowRight" && navIndex < navHistory.length - 1) {
-        e.preventDefault();
-        skipHistoryRef.current = true;
-        setNavIndex(navIndex + 1);
-        handleFocusTerm(navHistory[navIndex + 1]);
+        if (e.altKey && e.key === "ArrowLeft" && navIndex > 0) {
+          e.preventDefault();
+          skipHistoryRef.current = true;
+          setNavIndex(navIndex - 1);
+          const entry = navHistory[navIndex - 1];
+          if (!entry) return;
+          if (entry.type === "tree") {
+            setShowGuideMap(false);
+            handleFocusTerm(entry.term);
+          } else {
+            setShowGuideMap(true);
+            setGuideFocusPath(entry.focusPath);
+          }
+        }
+        if (e.altKey && e.key === "ArrowRight" && navIndex < navHistory.length - 1) {
+          e.preventDefault();
+          skipHistoryRef.current = true;
+          setNavIndex(navIndex + 1);
+          const entry = navHistory[navIndex + 1];
+          if (!entry) return;
+          if (entry.type === "tree") {
+            setShowGuideMap(false);
+            handleFocusTerm(entry.term);
+        } else {
+          setShowGuideMap(true);
+          setGuideFocusPath(entry.focusPath);
+        }
       }
     },
-    [showGuideMap, treeState.rootNode, ensureGuideMap, navHistory, navIndex, handleFocusTerm]
+    [showGuideMap, treeState.rootNode, ensureGuideMap, navHistory, navIndex, handleFocusTerm, guideFocusPath]
   );
 
   useEffect(() => {
@@ -1133,34 +1309,42 @@ export default function Home() {
 
   const hasRoot = !!treeState.rootNode;
 
-  const handleResizeStart = useCallback((onResize: (delta: number) => void) => (e: React.MouseEvent) => {
-    e.preventDefault();
-    let lastX = e.clientX;
-    const onMove = (ev: MouseEvent) => {
-      const delta = ev.clientX - lastX;
-      lastX = ev.clientX;
-      onResize(delta);
-    };
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, []);
+  const [isResizing, setIsResizing] = useState(false);
+  const handleResizeStart = useCallback(
+    (side: "left" | "right") => (e: React.MouseEvent) => {
+      e.preventDefault();
+      setIsResizing(true);
+      const startX = e.clientX;
+      const minW = side === "left" ? 180 : 200;
+      const maxW = side === "left" ? 400 : 500;
+      const startW = side === "left" ? leftWidth : rightWidth;
+      const onMove = (ev: MouseEvent) => {
+        const delta = ev.clientX - startX;
+        const newW = Math.min(maxW, Math.max(minW, side === "left" ? startW + delta : startW - delta));
+        if (side === "left") setLeftWidth(newW);
+        else setRightWidth(newW);
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        setIsResizing(false);
+      };
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    },
+    [leftWidth, rightWidth]
+  );
 
   return (
     <TermListContext.Provider value={termList}>
     <TooltipProvider delayDuration={200}>
       <div className="flex h-screen overflow-hidden">
-        {!leftCollapsed && (
-          <>
-            <aside style={{ width: leftWidth }} className="shrink-0 border-r bg-background flex flex-col">
-              <div className="px-4 py-2 border-b flex items-center justify-between">
+            <aside style={{ width: leftCollapsed ? 0 : leftWidth }} className={cn("shrink-0 bg-background flex flex-col overflow-hidden", !isResizing && "transition-[width] duration-300 ease-in-out", !leftCollapsed && "border-r")}>
+              <div className="px-4 py-2 border-b flex items-center justify-between shrink-0">
                 <span className="font-bold text-base">🌳 OmniExplore</span>
                 <button
                   onClick={() => setLeftCollapsed(true)}
@@ -1176,10 +1360,39 @@ export default function Home() {
             onSelect={handleWorkGroupSelect}
             onCreate={handleWorkGroupCreate}
           />
-          <div className="flex-1 overflow-hidden">
+          <div className="px-3 pt-2 shrink-0">
+            <button
+              onClick={() => {
+                dispatchTree({ type: "CLEAR_ROOT" });
+                dispatchFootprint({ type: "CLEAR" });
+              }}
+              className="w-full flex items-center justify-center gap-1 rounded-md border border-dashed border-muted-foreground/30 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>新建术语</span>
+            </button>
+          </div>
+          <div className="px-3 py-2 shrink-0">
+            <div className="relative">
+              <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+              <input
+                value={sidebarSearch}
+                onChange={(e) => setSidebarSearch(e.target.value)}
+                placeholder={leftTab === "terms" ? "搜索术语…" : "搜索文件…"}
+                className="w-full h-8 rounded-md border border-input bg-transparent pl-8 pr-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-4 px-4 pb-1.5 shrink-0">
+            <button onClick={() => setLeftTab("terms")} className={cn("text-[13px] font-semibold", leftTab === "terms" ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>术语</button>
+            <button onClick={() => setLeftTab("files")} className={cn("text-[13px] font-semibold", leftTab === "files" ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>文件</button>
+          </div>
+          <div className="flex-1 overflow-hidden px-4">
+            {leftTab === "terms" ? (
             <TermLibrary
               terms={termList}
               currentTerm={treeState.rootTerm}
+              search={leftTab === "terms" ? sidebarSearch : undefined}
               onTermClick={handleFocusTerm}
               onTermDelete={(term) => saveTermList(termList.filter((t) => t !== term))}
               onTermRename={(oldTerm, newTerm) => {
@@ -1193,7 +1406,68 @@ export default function Home() {
                 dispatchTree({ type: "CLEAR_ROOT" });
                 dispatchFootprint({ type: "CLEAR" });
               }}
+              showGuideMap={showGuideMap}
+              onAddToGuideMap={showGuideMap ? (term) => {
+                (async () => {
+                  if (!activeGroupId) return;
+                  const group = workGroups.find((g) => g.id === activeGroupId);
+                  if (!group) return;
+                  if (!group.guide_map) {
+                    group.guide_map = { term: "", children: [] };
+                  }
+                  const path = guideFocusPath;
+                  const newChild: GuideMapNode = { term: term.trim(), children: [] };
+                  const newTree = structuredClone(group.guide_map);
+
+                  let added = false;
+                  if (path.length === 0) {
+                    const lower = term.trim().toLowerCase();
+                    const exists = newTree.children.some((c) =>
+                      c.term === "" ? c.children.some((cc) => cc.term.toLowerCase() === lower) : c.term.toLowerCase() === lower
+                    );
+                    if (!exists) {
+                      newTree.children.push({ term: "", children: [newChild], _group: true });
+                      added = true;
+                    }
+                  } else {
+                    const parent = newTree.term === "" && path.length === 1
+                      ? newTree.children[path[0]]
+                      : (() => {
+                          let n: GuideMapNode = newTree.term === "" ? newTree.children[path[0]] : newTree;
+                          for (let i = newTree.term === "" ? 1 : 0; i < path.length; i++) {
+                            n = n.children[path[i]];
+                          }
+                          return n;
+                        })();
+                    if (parent) {
+                      const lower = term.trim().toLowerCase();
+                      const exists = parent.children.some((c) => c.term.toLowerCase() === lower);
+                      if (!exists) {
+                        parent.children.push(newChild);
+                        added = true;
+                      }
+                    }
+                  }
+                  if (added) {
+                    group.guide_map = newTree;
+                    group.updated_at = Date.now();
+                    await putWorkGroup(group);
+                    setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+                  } else {
+                    setToast(`"${term.trim()}" 已存在于当前图层`);
+                  }
+                })();
+              } : undefined}
             />
+            ) : (
+            <FilesList
+              files={storedFiles}
+              onFileClick={setActivePdf}
+              search={leftTab === "files" ? sidebarSearch : undefined}
+              onUpload={async (f) => { await putFile(f); setStoredFiles((prev) => [...prev, f]); }}
+              onDelete={async (id) => { await deleteFile(id); setStoredFiles((prev) => prev.filter((f) => f.id !== id)); }}
+            />
+            )}
           </div>
           <div className="border-t p-1.5">
             <SettingsPanel
@@ -1206,14 +1480,14 @@ export default function Home() {
             />
           </div>
             </aside>
+        {!leftCollapsed && (
             <div
               className="w-1 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 shrink-0 transition-colors"
-              onMouseDown={handleResizeStart((delta) => setLeftWidth((w) => Math.min(400, Math.max(180, w + delta))))}
+              onMouseDown={handleResizeStart("left")}
             />
-          </>
         )}
         {leftCollapsed && (
-          <div className="w-10 shrink-0 border-r bg-background flex flex-col items-center py-2 gap-3">
+          <div className="w-10 shrink-0 border-r bg-background flex flex-col items-center py-2 gap-3 transition-all duration-300 ease-in-out">
             <button
               onClick={() => setLeftCollapsed(false)}
               className="p-0.5 rounded hover:bg-accent text-muted-foreground"
@@ -1239,18 +1513,24 @@ export default function Home() {
                     </button>
                   </PopoverTrigger>
                   <PopoverContent className="w-48 max-h-60 overflow-auto" align="start">
-                    {navHistory.slice(0, navIndex).filter(t => t !== (navHistory[navIndex] || "")).reverse().map((term, i) => (
+                    {navHistory.slice(0, navIndex).filter(e => !navEntryEq(e, navHistory[navIndex])).reverse().map((entry, i) => (
                       <button
-                        key={`${term}-${i}`}
+                        key={`${navEntryLabel(entry)}-${i}`}
                         className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent truncate"
                         onClick={() => {
                           setBackOpen(false);
                           skipHistoryRef.current = true;
                           setNavIndex(navIndex - 1 - i);
-                          handleFocusTerm(term);
+                          if (entry.type === "tree") {
+                            setShowGuideMap(false);
+                            handleFocusTerm(entry.term);
+                          } else {
+                            setShowGuideMap(true);
+                            setGuideFocusPath(entry.focusPath);
+                          }
                         }}
                       >
-                        {term}
+                        {navEntryLabel(entry)}
                       </button>
                     ))}
                     {navIndex <= 0 && (
@@ -1269,18 +1549,24 @@ export default function Home() {
                     </button>
                   </PopoverTrigger>
                   <PopoverContent className="w-48 max-h-60 overflow-auto" align="start">
-                    {navHistory.slice(navIndex + 1).map((term, i) => (
+                    {navHistory.slice(navIndex + 1).map((entry, i) => (
                       <button
-                        key={`${term}-${i}`}
+                        key={`${navEntryLabel(entry)}-${i}`}
                         className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent truncate"
                         onClick={() => {
                           setFwdOpen(false);
                           skipHistoryRef.current = true;
                           setNavIndex(navIndex + 1 + i);
-                          handleFocusTerm(term);
+                          if (entry.type === "tree") {
+                            setShowGuideMap(false);
+                            handleFocusTerm(entry.term);
+                          } else {
+                            setShowGuideMap(true);
+                            setGuideFocusPath(entry.focusPath);
+                          }
                         }}
                       >
-                        {term}
+                        {navEntryLabel(entry)}
                       </button>
                     ))}
                     {navIndex >= navHistory.length - 1 && (
@@ -1312,17 +1598,71 @@ export default function Home() {
           </header>
 
           <div className="flex-1 flex flex-col min-h-0 max-w-3xl mx-auto w-full">
-            {showGuideMap ? (
+              {!showGuideMap && treeState.rootTerm && (
+                <div className="flex items-center px-4 py-2 border-b shrink-0">
+                  <button
+                    onClick={() => { ensureGuideMap(); setShowGuideMap(true); }}
+                    className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                    title="进入导图视图"
+                  >
+                    <Layers className="w-4 h-4" />
+                    <span className="text-xs">组合</span>
+                  </button>
+                  <button
+                    onClick={() => { ensureGuideMap(); setShowGuideMap(true); setGuideFocusPath([]); }}
+                    className="text-xs px-1 py-0.5 rounded text-muted-foreground hover:text-foreground transition-colors ml-3 max-w-[120px] truncate"
+                  >根</button>
+                  {buildBreadcrumbItems(activeGroup?.guide_map ?? null, guideFocusPath).map((item, i) => (
+                    <span key={i} className="flex items-center gap-0.5">
+                      <ChevronRight className="w-4 h-4 text-muted-foreground mx-0.5" />
+                      <button
+                        onClick={() => { ensureGuideMap(); setShowGuideMap(true); setGuideFocusPath(item.path); }}
+                        className="text-xs px-1 py-0.5 rounded text-muted-foreground hover:text-foreground transition-colors max-w-[120px] truncate"
+                      >{item.label}</button>
+                    </span>
+                  ))}
+                  <ChevronRight className="w-4 h-4 text-muted-foreground mx-0.5" />
+                  <span className="text-xs font-medium">{treeState.rootTerm}</span>
+                </div>
+              )}
+              {showGuideMap ? (
               <GuideMapCanvas
                 guideMap={activeGroup?.guide_map ?? null}
-                initialFocusPath={guideFocusRef.current}
-                onNodeClick={handleGuideMapNodeClick}
+                initialFocusPath={guideFocusPath}
+                  onNodeClick={handleGuideMapNodeClick}
                 termList={termList}
                 currentFocusTerm={treeState.rootTerm}
                 onUpdate={handleGuideMapUpdate}
-                onBack={() => setShowGuideMap(false)}
-                onFocusPathChange={(path) => { guideFocusRef.current = path; }}
-                onRebuild={async (scopePath: number[]) => {
+                onBack={() => {
+                  setShowGuideMap(false);
+                  if (treeState.rootTerm) {
+                    setPreviewTitle(treeState.rootTerm);
+                    const id = SparkMD5.hash(treeState.rootTerm.toLowerCase());
+                    getConceptNode(id).then((pcached) => {
+                      if (pcached) {
+                        const plines: string[] = [];
+                        const ppresets = [
+                          { icon: "🌳", label: "动态直觉", field: "micro_intuition" as const },
+                          { icon: "📐", label: "看定义", field: "micro_definition" as const },
+                          { icon: "🔧", label: "看应用", field: "micro_application" as const },
+                          { icon: "📜", label: "看动机", field: "micro_motivation" as const },
+                        ];
+                        for (const p of ppresets) {
+                          const val = pcached[p.field] as string | null;
+                          plines.push(`  ${p.icon} ${p.label}${val ? "" : " (未生成)"}`);
+                          const sub = pcached.custom_qa.filter((qa) => qa.parent_node_id === `preset:${p.field}`);
+                          for (const qa of sub) plines.push(`    ${qa.type === "inquiry" ? "💬" : "📖"} ${qa.question || extractTitle(qa.answer) || "空节点"}`);
+                        }
+                        const rootSub = pcached.custom_qa.filter((qa) => qa.parent_node_id === "root");
+                        for (const qa of rootSub) plines.push(`  ${qa.type === "inquiry" ? "💬" : "📖"} ${qa.question || extractTitle(qa.answer) || "空节点"}`);
+                        setPreviewContent(plines.join("\n"));
+                      }
+                    });
+                  }
+                }}
+                onNavigate={handleGuideMapNavigate}
+                onFocusPathChange={setGuideFocusPath}
+                  onRebuild={async (scopePath: number[]) => {
                   if (!activeGroupId) return;
                   const group = workGroups.find((g) => g.id === activeGroupId);
                   if (!group?.guide_map) return;
@@ -1340,14 +1680,14 @@ export default function Home() {
                     if (node) {
                       const terms: string[] = [];
                       const seen = new Set<string>();
-                      function collect(n: GuideMapNode) {
+                      const collect = (n: GuideMapNode): void => {
                         if (n.children.length > 0 || n.term === "") {
                           n.children.forEach(collect);
                         } else if (n.term && !seen.has(n.term.toLowerCase())) {
                           seen.add(n.term.toLowerCase());
                           terms.push(n.term);
                         }
-                      }
+                      };
                       node.children.forEach(collect);
                       node.children = terms.map((t) => ({ term: t, children: [] as GuideMapNode[] }));
                       group.guide_map = JSON.parse(JSON.stringify(group.guide_map));
@@ -1402,7 +1742,7 @@ export default function Home() {
               onCreateChild={(text) => {
                 setFillValue("");
                 if (showGuideMap) {
-                  handleAddGuideMapNode(text);
+                  handleAddGuideMapNode(text, guideFocusPath);
                 } else {
                   handleCreateChild(text);
                 }
@@ -1411,21 +1751,28 @@ export default function Home() {
           </div>
         </main>
 
-        {!rightCollapsed && (
-          <>
+        {!rightCollapsed && !activePdf && (
             <div
               className="w-1 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 shrink-0 transition-colors"
-              onMouseDown={handleResizeStart((delta) => setRightWidth((w) => Math.min(500, Math.max(200, w - delta))))}
+              onMouseDown={handleResizeStart("right")}
             />
-            <div style={{ width: rightWidth }} className="shrink-0">
+        )}
+            <div style={{ width: rightCollapsed ? 0 : rightWidth }} className={cn("shrink-0", !isResizing && "transition-[width] duration-300 ease-in-out", !activePdf && "overflow-hidden")}>
+        {activePdf ? (
+          <PDFViewer data={activePdf.data} fileName={activePdf.name} onClose={() => setActivePdf(null)} />
+        ) : (
         <PreviewPanel
           termName={previewTitle}
           content={previewContent}
         />
-            </div>
-          </>
         )}
+            </div>
       </div>
+        {toast && (
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-md bg-foreground text-background text-sm shadow-lg transition-opacity duration-200">
+            {toast}
+          </div>
+        )}
     </TooltipProvider>
     </TermListContext.Provider>
   );

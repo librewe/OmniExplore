@@ -11,10 +11,10 @@ interface PreviewPanelProps {
 export function PreviewPanel({ termName, content }: PreviewPanelProps) {
   return (
     <div className={cn("shrink-0 border-l bg-background flex flex-col h-full")}>
-      <div className="flex items-center px-4 py-2 border-b">
+      <div className="flex items-center px-4 h-10 border-b">
         <div className="flex items-center gap-1.5 min-w-0">
           <ExternalLink className="w-4 h-4 text-muted-foreground shrink-0" />
-          <span className="text-base font-medium">预览面板</span>
+          <span className="text-sm font-medium">预览面板</span>
         </div>
       </div>
       <div className="flex-1 overflow-auto p-3 whitespace-pre-wrap">

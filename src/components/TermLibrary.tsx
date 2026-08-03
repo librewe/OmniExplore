@@ -11,10 +11,14 @@ interface TermLibraryProps {
   onTermDelete: (term: string) => void;
   onTermRename: (oldTerm: string, newTerm: string) => void;
   onNewTerm: () => void;
+  showGuideMap?: boolean;
+  onAddToGuideMap?: (term: string) => void;
+  search?: string;
 }
 
-export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onTermRename, onNewTerm }: TermLibraryProps) {
-  const [search, setSearch] = useState("");
+export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onTermRename, onNewTerm, showGuideMap, onAddToGuideMap, search: externalSearch }: TermLibraryProps) {
+  const [internalSearch, setInternalSearch] = useState("");
+  const search = externalSearch ?? internalSearch;
   const [renamingTerm, setRenamingTerm] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
@@ -24,12 +28,13 @@ export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onT
 
   return (
     <div className="flex flex-col h-full">
+      {externalSearch === undefined && (
       <div className="px-3 py-2 border-b">
         <div className="relative">
           <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={internalSearch}
+            onChange={(e) => setInternalSearch(e.target.value)}
             placeholder="搜索术语…"
             className="w-full h-8 rounded-md border border-input bg-transparent pl-8 pr-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
@@ -42,6 +47,7 @@ export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onT
           <span>新建术语</span>
         </button>
       </div>
+      )}
       <div className="flex-1 overflow-auto py-1">
         {filtered.length === 0 ? (
           <p className="text-xs text-muted-foreground text-center py-6">
@@ -89,6 +95,18 @@ export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onT
                 )}
                 {!isRenaming && (
                   <div className="flex shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {showGuideMap && onAddToGuideMap && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onAddToGuideMap(term);
+                        }}
+                        className="p-0.5 rounded hover:bg-accent"
+                        title="添加到当前导图层"
+                      >
+                        <Plus className="w-3 h-3 text-muted-foreground" />
+                      </button>
+                    )}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
