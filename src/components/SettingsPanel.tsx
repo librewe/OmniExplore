@@ -388,7 +388,7 @@ export function SettingsPanel({
             <TabsContent value="selmenu" className="p-6 m-0">
               <div className="space-y-4">
                 <p className="text-sm text-muted-foreground">
-                  配置划词右键菜单中的追问模板。{"${selected}"} 替换为选中文本，{"${root}"} 替换为当前根术语。
+                  配置划词右键菜单中的追问模板。{"${selected}"} 替换为选中文本，{"${root}"} 替换为当前节点。
                 </p>
 
                 {selectionMenuItems.map((item) => (

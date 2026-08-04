@@ -35,7 +35,7 @@ export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onT
           <input
             value={internalSearch}
             onChange={(e) => setInternalSearch(e.target.value)}
-            placeholder="搜索术语…"
+            placeholder="搜索节点…"
             className="w-full h-8 rounded-md border border-input bg-transparent pl-8 pr-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
         </div>
@@ -44,14 +44,14 @@ export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onT
           className="mt-1.5 w-full flex items-center justify-center gap-1 rounded-md border border-dashed border-muted-foreground/30 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
         >
           <Plus className="w-3.5 h-3.5" />
-          <span>新建术语</span>
+          <span>新建节点</span>
         </button>
       </div>
       )}
       <div className="flex-1 overflow-auto py-1">
         {filtered.length === 0 ? (
           <p className="text-xs text-muted-foreground text-center py-6">
-            {search ? "未找到" : "暂无术语"}
+            {search ? "未找到" : "暂无节点"}
           </p>
         ) : (
           filtered.map((term) => {
@@ -120,7 +120,7 @@ export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onT
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (confirm(`确定删除术语"${term}"？`)) onTermDelete(term);
+                        if (confirm(`确定删除节点"${term}"？`)) onTermDelete(term);
                       }}
                       className="p-0.5 rounded hover:bg-destructive/10"
                     >

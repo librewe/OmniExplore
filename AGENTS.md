@@ -4,15 +4,15 @@
 
 ## 项目定位
 
-本地优先的认知考古工具。纯前端 SPA（Next.js 静态导出），无后端，无 auth。用户在输入框输入术语（根节点）→ 创建知识树 → 用预设提示词或自定义追问 LLM → 递归展开子节点 → 按 Esc 进入导图视图查看多术语集合。
+本地优先的认知考古工具。纯前端 SPA（Next.js 静态导出），无后端，无 auth。用户在输入框输入节点 → 创建知识树 → 用预设提示词或自定义追问 LLM → 递归展开子节点 → 按 Esc 进入组合视图（原导图）查看多节点集合。左侧栏支持**节点**和**文件**两个 tab，文件 tab 支持拖入 PDF 并绑定到节点。
 
 ## 已完成
 
 ### 核心数据流
 
 ```
-用户输入术语 → InputBar(tag 驱动)
-  → page.tsx handleCreateRoot / handleCreateChild
+用户输入节点 → InputBar(tag 驱动)
+  → page.tsx handleFocusTerm / handleCreateChild
     → treeStore dispatch(ADD_CHILD)
     → IndexedDB putConceptNode
     → tree 重渲染（TreeNode 递归）
@@ -22,18 +22,21 @@
 
 ```
 layout.tsx
-└─ page.tsx  （状态枢纽 ~1500 行）
+└─ page.tsx  （状态枢纽 ~1950 行）
    ├─ 左侧栏 (可拖拽宽度)
    │   ├─ WorkGroupSwitcher
-   │   └─ TermLibrary
+   │   ├─ 共享搜索框 + Tab(节点|文件)
+   │   ├─ TermLibrary / FilesList
+   │   └─ SettingsPanel（设置按钮）
    ├─ 中央 (flex-1)
    │   ├─ 导航栏（← → 按钮 + 返回/前进下拉 + 工作区标题）
-   │   ├─ 树面包屑栏（树视图下：组合 + 根>...路径；与导图头部复用 buildBreadcrumbItems）
+   │   ├─ 树面包屑栏（树视图下：组合 + 根>...路径）
    │   ├─ RecursiveTree / GuideMapCanvas （二选一，showGuideMap 切换）
    │   ├─ Onboarding （无根节点时显示）
    │   └─ InputBar （底部固定）
-   ├─ 右侧栏 (可拖拽宽度)
-   │   └─ PreviewPanel
+   ├─ 右侧栏 (可拖拽宽度，PDF 时自动扩展至 45%)
+   │   ├─ PreviewPanel（树预览）
+   │   └─ PDFViewer（PDF 阅读，划词右键聚焦）
    └─ SettingsPanel （Dialog 弹窗）
 ```
 
@@ -41,73 +44,67 @@ layout.tsx
 
 | Store | 机制 | 用途 |
 |---|---|---|
-| `treeStore` | useReducer | 当前知识树：展开/收起、增删改子节点、streaming 追加 |
+| `treeStore` | useReducer | 当前知识树：展开/收起、增删改子节点、streaming 追加、REORDER_CHILDREN |
 | `configStore` | Zustand | LLM 配置、预设提示词、加号菜单项（localStorage 持久化） |
 | `footprintStore` | useReducer | 认知足迹路径（未持久化） |
-| page 本地 state | useState/useRef | activeGroupId, showGuideMap, previewNode, navHistory, guideFocusPath, leftWidth/rightWidth, leftCollapsed/rightCollapsed, isResizing... |
+| page 本地 state | useState/useRef | activeGroupId, showGuideMap, previewNode, navHistory, guideFocusPath, leftWidth/rightWidth, leftCollapsed/rightCollapsed, isResizing, leftTab, storedFiles, activePdf, pdfBoundTerm, sidebarSearch... |
 
 ### 关键约定
 
-- **术语占位符**：prompt 模板用 `${term}`（非 `{term}`），发送时 replace 替换
-- **IndexedDB key**：`concept_nodes` object store，key = term 字符串
-- **localStorage key**：`term_list_{groupId}` 存术语列表，`omniexplore_presets` 存预设
+- **节点占位符**：prompt 模板用 `${term}`（非 `{term}`），发送时 replace 替换
+- **IndexedDB key**：`concept_nodes` object store，key = `SparkMD5.hash(term.toLowerCase())`；`files` store 存 PDF 等文件（base64）；`work_groups` store 存工作组
+- **localStorage key**：`term_list_{groupId}` 存节点列表，`omniexplore_presets` 存预设，`pdf_bindings` 存 PDF→节点绑定关系
 - **SSE 超时**：仅连接超时 30s（无首 token 超时），流式无总体超时
 - **标题生成**：`extractTitle(content)` → 取首行截断 15 字符；preset child 从预设 prefix 取
-- **导图虚拟根**：当导图有多个根时，包装为 `{term:"", children:[...]}`；GuideMap 组件检测 `!guideMap.term` 时渲染 children 为平级
-- **tag 前缀**：InputBar 的 `tagPrefix` prop；导图模式传 `""` 不显示"追加到"
+- **组合视图虚拟根**：当有多个根时，包装为 `{term:"", children:[...]}`；GuideMapCanvas 检测 `!guideMap.term` 时渲染 children 为平级
+- **tag 前缀**：InputBar 的 `tagPrefix` prop；组合视图传 `""` 不显示"追加到"
 - **导航历史**：`NavEntry[]` 联合类型（`{type:"tree", term}` | `{type:"guideMap", pathStr, focusPath}`），每工作组独立。前进/返回导航暂搁置。
-- **focusPath**：从虚拟根开始的索引数组，如 `[0,1]` = `root.children[0].children[1]`；用于 `guideFocusPath` 定位导图层级
-- **buildBreadcrumbItems**：从 `GuideMapCanvas.tsx` 导出，树视图面包屑与导图头部复用同一函数
-- **ESC 行为**：导图中沿 `focusPath` 面包屑逐层退出，根层回到树视图；树视图中切换导图（全局导图）
-- **术语库作用域**：每工作组独立（key: `term_list_{groupId}`），设置面板显示全部聚合
+- **focusPath**：从虚拟根开始的索引数组，如 `[0,1]` = `root.children[0].children[1]`；用于 `guideFocusPath` 定位层级
+- **buildBreadcrumbItems**：从 `GuideMapCanvas.tsx` 导出，树视图面包屑与组合视图头部复用同一函数
+- **ESC 行为**：组合视图中沿 `focusPath` 面包屑逐层退出，根层回到树视图；树视图中切换组合视图
+- **左侧 tab**：节点 tab 和文件 tab 共享搜索框；文件 tab 支持拖拽上传、删除；点击文件列表中的 PDF → 右侧面板打开
+- **PDF 绑定**：PDF 可绑定到节点，绑定关系存 `localStorage.pdf_bindings`（`{"A.pdf":"量子计算"}`），改名时自动同步；刷新后从 localStorage 恢复
+- **三视图同步**：改名/删除/创建节点时，术语库、知识树、组合视图三者同步更新（包括 IndexedDB key 迁移）
+- **树节点 DnD**：拖到节点中心=归层，拖到间隙=重排；支持跨层展平（改 parent_node_id + 插入新位置）
+- **UI 命名统一**：术语→节点，导图→组合，图层→层级，根节点保留
 
 ### 未实现的需求（来自 简化需求.md）
 
-- 导图节点排序拖拽（现在导图可手动增删改节点、DnD 组合/移出，但排序 DnD 未做）
 - 足迹持久化
 - 引导页
 - 后续规划全部（微观↔宏观双知识树、撤销/重做、反向链接、浏览器插件等）
-- PDF 导入与预览
+- LLM 对话面板
 
 ### 已知限制
 
-- `page.tsx` 过长（~1500 行），未来应拆分为 custom hooks 或独立 handler 模块
+- `page.tsx` 过长（~1950 行），未来应拆分为 custom hooks 或独立 handler 模块
 - 未做移动端适配
 - 没有测试
-
-## 开发命令
-
-```bash
-npm run dev      # 开发服务器
-npm run build    # 静态导出到 out/
-```
 
 ## 文件索引
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `src/app/page.tsx` | ~1500 | 主组件：全部 handler、状态、事件、快捷键、生命周期 |
-| `src/components/TreeNode.tsx` | ~350 | 递归树节点：渲染、编辑、拖拽手柄、右键菜单 |
-| `src/components/GuideMapCanvas.tsx` | ~150 | 导图视图：DnD 拖拽组合、面包屑、图节点递归渲染 |
+| `src/app/page.tsx` | ~1950 | 主组件：全部 handler、状态、事件、快捷键、生命周期、PDF 集成 |
+| `src/components/TreeNode.tsx` | ~410 | 递归树节点：渲染、编辑、拖拽手柄、右键菜单、双击编辑 |
+| `src/components/GuideMapCanvas.tsx` | ~700 | 组合视图：DnD 拖拽组合、面包屑、图节点递归渲染、termCount 保护 |
 | `src/components/InputBar.tsx` | ~100 | tag 驱动输入框 + Ctrl+Enter/Enter 逻辑 |
-| `src/components/SettingsPanel.tsx` | ~410 | 4-tab 设置 Dialog |
-| `src/components/ContextMenu.tsx` | ~120 | 菜单项工厂函数（nodeMenuItems/rootMenuItems/selectionMenuItems） |
-| `src/components/PlusMenu.tsx` | ~80 | 加号下拉菜单（预设 + 创建空子节点） |
-| `src/store/treeStore.ts` | 233 | 树 reducer + findNode / removeNode / buildRootNode |
-| `src/services/cache.ts` | ~80 | IndexedDB CRUD |
-| `src/services/llm.ts` | ~60 | SSE 流式 LLM 调用（async generator, yield per chunk） |
-| `src/services/prompts.ts` | ~80 | 预设提示词管理（localStorage） |
-| `src/types/index.ts` | 97 | 所有类型定义 |
-| `src/lib/constants.ts` | ~60 | 8 个预设定义、默认 LLM 配置、getPresetPrefix 辅助 |
-
-## 如果继续开发
-
-1. 先读 `简化需求.md`（唯一权威需求文档）
-2. 主入口 `src/app/page.tsx`；所有核心逻辑在此
-3. `src/types/index.ts` 是数据模型
-4. 新增功能优先拆 page.tsx 中的 handler 到独立 hook（如 `useTreeHandlers.ts`）
-5. 导图 DnD 是下一步最大的一块工作
-6. 遵循现有约定：`${term}` 占位、虚拟根、tagPrefix、per-group 术语隔离
+| `src/components/SettingsPanel.tsx` | ~555 | 4-tab 设置 Dialog |
+| `src/components/TermLibrary.tsx` | ~140 | 节点列表、搜索、增删改、组合视图 +号 |
+| `src/components/FilesList.tsx` | ~110 | 文件列表：拖拽上传、搜索、删除、点击打开 PDF |
+| `src/components/PDFViewer.tsx` | ~155 | PDF 阅读器：页码导航、Ctrl+滚轮缩放、文本层（可选中划词）、右键聚焦菜单 |
+| `src/components/MarkdownRenderer.tsx` | ~60 | Markdown 渲染，支持 `[text](./files/xxx.pdf)` 文件链接 |
+| `src/components/ContextMenu.tsx` | ~120 | 菜单项工厂函数 |
+| `src/components/PlusMenu.tsx` | ~80 | 加号下拉菜单 |
+| `src/components/RecursiveTree.tsx` | ~230 | DnD Context + drop indicator 状态管理 |
+| `src/components/PreviewPanel.tsx` | ~35 | 右侧树预览面板 |
+| `src/store/treeStore.ts` | ~250 | 树 reducer + REORDER_CHILDREN |
+| `src/services/cache.ts` | ~100 | IndexedDB CRUD（含 files store） |
+| `src/services/llm.ts` | ~60 | SSE 流式 LLM 调用 |
+| `src/services/prompts.ts` | ~80 | 预设提示词管理 |
+| `src/services/termParser.ts` | ~90 | 术语/文件链接解析，保护 markdown 链接不被拆散 |
+| `src/types/index.ts` | ~105 | 所有类型定义（含 StoredFile） |
+| `src/lib/constants.ts` | ~60 | 预设定义、默认配置 |
 
 ---
 
@@ -644,3 +641,128 @@ TypeError: Cannot read properties of undefined (reading 'type')**
 ### 第 83 轮
 **关于前进/返回导航那块我决定暂时搁置，而不是已完成。
 合并到agent.md**
+
+---
+
+> 来源 session: 本轮会话 — "PDF 集成 + 拖拽排序 + UI 统一"
+> 共 50+ 轮用户输入，时间跨度 2026-08-01 ~ 2026-08-05
+
+### 第 84 轮
+**好，我们继续吧，接下来考虑pdf部分，你有什么建议吗**
+
+### 第 85 轮
+论文伴读、IndexedDB 存储、MVP 先做上传→渲染→划词；讨论 PDF 与知识树的关联方式
+
+### 第 86 轮
+选择方案 A（挂载到根节点）、但进一步提出：pdf 可上传作为文件管理，和术语并列但是放在文件夹里，挂载它只需要在子节点中使用 markdown 的链接语法
+
+### 第 87 轮
+MVP 优先级：文件管理 → 链接渲染 → PDF 查看；选择 Tab 切换侧栏（术语 | 文件）
+
+### 第 88 轮
+文件如何布局管理上传，做成类似于 Overleaf 风格；列出若干 bug 和新功能需求：空节点编辑无法保存、导图输入框添加无效、侧栏收起动画、双击编辑、拖拽排序、PDF 面板行为、LLM 对话功能
+
+### 第 89 轮
+先修 bug 再测试，再继续 PDF；LLM 对话加入未来规划
+
+### 第 90 轮
+**关于前进/返回导航那块我决定暂时搁置，而不是已完成。合并到agent.md**
+
+### 第 91 轮
+bug #2 空节点编辑不保存；bug #3 导图添加节点无效；bug #5 侧栏收起/展开动画
+
+### 第 92 轮
+bug #3 目标已存在时做 toast 提示
+
+### 第 93 轮
+#6 拖拽排序/展平讨论：归层+重排+展平统一，蓝色指示线 + 节点高亮
+
+### 第 94 轮
+展平不用单独做——蓝线本身能表达；开始实现拖拽排序
+
+### 第 95 轮
+实现后反馈：蓝色线只出现在根节点下方，拖到节点上无事发生；before/after 设计讨论
+
+### 第 96 轮
+改用间隙检测替代三区比例——解决子节点展开内容导致"下半区"位置错误
+
+### 第 97 轮
+只有拖到节点上才生效移动逻辑，蓝线时不生效
+
+### 第 98 轮
+发现 `tParentId: null`——预设节点的 `parentId` 未设，修复 `buildPresetChildren` 加 `parentId: "root"`
+
+### 第 99 轮
+两相邻折叠节点间无法放到二者间——加 6px 容差带
+
+### 第 100 轮
+拖拽判定用浮层中心而非鼠标位置——改用 `activatorEvent.clientY + delta.y`
+
+### 第 101 轮
+展开/收起 icon 位置未对齐——占位符 `w-[15px]` → `w-3`(12px)
+
+### 第 102 轮
+创建 FilesList 组件、IndexedDB files store、左侧 tab 切换（📋 术语 | 📁 文件）
+
+### 第 103 轮
+tab 样式调整：纯文字、左对齐、无图标分隔线、放在搜索框下
+
+### 第 104 轮
+搜索框复用 TermLibrary 样式、新建术语按钮保留、tab 改小加粗
+
+### 第 105 轮
+PDF 渲染器：pdfjs-dist 集成、文本层、Ctrl+滚轮缩放
+
+### 第 106 轮
+canvas 重复渲染错误 + topLevelAwait 警告修复
+
+### 第 107 轮
+PDF 标题行高对齐、预览面板范围调整
+
+### 第 108 轮
+复用 PreviewPanel 外壳——竖线+"预览面板"标题；PDF 文件名显示在标题行
+
+### 第 109 轮
+Ctrl+滚轮改为中心缩放；添加文本层叠支持划词
+
+### 第 110 轮
+文本层与缩放不兼容——不用 TextLayerBuilder，改手动 `convertToViewportPoint` 定位
+
+### 第 111 轮
+按行分组渲染 → 空格宽度仍不对 → 回绝对定位 + 显式宽度 + `text-align-last: justify`
+
+### 第 112 轮
+接入划词右键菜单聚焦逻辑；Markdown 链接 `[text](./files/xxx.pdf)` 点击打开 PDF；点击 PDF 文件自动聚焦绑定节点
+
+### 第 113 轮
+Markdown 链接被 termParser 拆散——`matchFreeTerms` 跳过 `[text](url)` 区域
+
+### 第 114 轮
+根节点重命名保存 + 双击整行编辑 + 导图注册
+
+### 第 115 轮
+根节点改名未同步 IndexedDB key + 术语删除不刷新；pdfjs topLevelAwait 警告
+
+### 第 116 轮
+导图新增逻辑改为不包图层、图标区分组/节点、ensureGuideMap 自动补全缺失根术语
+
+### 第 117 轮
+三视图同步修复表：A 改名/B 删除/C 创建——更新 rootTerm、preview、guide_map、breadcrumb、termList
+
+### 第 118 轮
+导图保护改按全图 term 出现次数（非分组内）；PDF 绑定检测改用 IndexedDB
+
+### 第 119 轮
+创建绑定节点按钮隐藏/显示逻辑修复
+
+### 第 120 轮
+导图视图新建术语直接跳回初始界面 + 清空 tag；初始视图点 PDF 自动聚焦；PDF 关闭宽度复原不覆盖
+
+### 第 121 轮
+绑定改用 localStorage `pdf_bindings` 持久化；改名/删除同步更新
+
+### 第 122 轮
+`handleRenameSubmit` 闭包过期——`pdfBoundTerm` 不在 deps 里，改用 ref
+
+### 第 123 轮
+UI 文字统一：术语→节点，导图→组合，图层→层级

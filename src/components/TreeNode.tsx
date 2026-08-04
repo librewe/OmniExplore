@@ -23,6 +23,7 @@ interface TreeNodeProps {
   onTermContextMenu: (e: React.MouseEvent, term: string) => void;
   onTermHover: (e: React.MouseEvent, term: string) => void;
   onTermLeave: () => void;
+  onFileLink?: (filename: string) => void;
   onPlusSelect: (parentId: string, prompt: string) => void;
   onCreateEmptyChild: (parentId: string) => void;
   onEditContent: (nodeId: string) => void;
@@ -120,6 +121,7 @@ export function TreeNode({
   onTermContextMenu,
   onTermHover,
   onTermLeave,
+  onFileLink,
   onPlusSelect,
   onCreateEmptyChild,
   onEditContent,
@@ -208,6 +210,10 @@ export function TreeNode({
         )}
         style={dragStyle}
         onClick={handleClick}
+        onDoubleClick={() => {
+          if (isRoot) { onRename(node.id); }
+          else { onEditContent(node.id); }
+        }}
         onContextMenu={(e) => {
           onSelect(node.id);
           handleContextMenu(e);
@@ -269,7 +275,8 @@ export function TreeNode({
                 )}
                 onDoubleClick={(e) => {
                   e.stopPropagation();
-                  if (!isRoot) onEditContent(node.id);
+                  if (isRoot) { onRename(node.id); }
+                  else { onEditContent(node.id); }
                 }}
               >
                 {node.title}
@@ -331,6 +338,7 @@ export function TreeNode({
               onTermContextMenu={onTermContextMenu}
               onTermHover={onTermHover}
               onTermLeave={onTermLeave}
+              onFileLink={onFileLink}
               className="text-muted-foreground"
             />
           ) : (
@@ -359,6 +367,7 @@ export function TreeNode({
             onTermContextMenu={onTermContextMenu}
             onTermHover={onTermHover}
             onTermLeave={onTermLeave}
+            onFileLink={onFileLink}
             onPlusSelect={onPlusSelect}
             onCreateEmptyChild={onCreateEmptyChild}
             onEditContent={onEditContent}

@@ -12,6 +12,7 @@ interface TermTextProps {
   onTermContextMenu?: (e: React.MouseEvent, term: string) => void;
   onTermHover?: (e: React.MouseEvent, term: string) => void;
   onTermLeave?: () => void;
+  onFileLink?: (filename: string) => void;
   className?: string;
 }
 
@@ -21,6 +22,7 @@ export const TermText = memo(function TermText({
   onTermContextMenu,
   onTermHover,
   onTermLeave,
+  onFileLink,
   className,
 }: TermTextProps) {
   const termList = useTermList();
@@ -54,7 +56,7 @@ export const TermText = memo(function TermText({
     <span className={cn("text-sm leading-relaxed", className)}>
       {segments.map((seg, i) => {
         if (seg.type === "text") {
-          return <MarkdownRenderer key={i} content={seg.content} inline />;
+          return <MarkdownRenderer key={i} content={seg.content} inline onFileLink={onFileLink} />;
         }
         return (
           <span

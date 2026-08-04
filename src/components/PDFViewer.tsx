@@ -10,9 +10,12 @@ interface PDFViewerProps {
   data: string;
   fileName: string;
   onClose: () => void;
+  onSelectionContextMenu?: (e: MouseEvent, selectedText: string) => void;
+  onCreateBoundTerm?: () => void;
+  boundTermExists?: boolean;
 }
 
-export function PDFViewer({ data, fileName, onClose }: PDFViewerProps) {
+export function PDFViewer({ data, fileName, onClose, onSelectionContextMenu, onCreateBoundTerm, boundTermExists }: PDFViewerProps) {
   const [numPages, setNumPages] = useState(0);
   const [pageNum, setPageNum] = useState(1);
   const [scale, setScale] = useState(1.2);
@@ -65,23 +68,27 @@ export function PDFViewer({ data, fileName, onClose }: PDFViewerProps) {
       if (!document.getElementById("pdf-text-layer-style")) {
         const s = document.createElement("style");
         s.id = "pdf-text-layer-style";
-        s.textContent = `.pdf-text-span{position:absolute;color:transparent;white-space:pre;cursor:text;user-select:text}.pdf-text-span::selection{background:rgb(59 130 246 / 0.7)}`;
+        s.textContent = `.pdf-text-span{position:absolute;color:transparent;white-space:pre;cursor:text;user-select:text;overflow:hidden}.pdf-text-span::selection{background:rgb(59 130 246 / 0.5)}`;
         document.head.appendChild(s);
       }
-      for (const item of textContent.items) {
-        const it = item as any;
-        if (!it.str) continue;
-        const tx = it.transform;
+      const items = (textContent.items as any[]).filter((it) => it.str && it.transform);
+      for (const item of items) {
+        const tx = item.transform;
         const [vx, vy] = textViewport.convertToViewportPoint(tx[4], tx[5]);
         const fontSize = Math.abs(tx[3]) * textViewport.scale || 12;
+        const advW = (item.width || Math.abs(tx[0])) * textViewport.scale;
         const span = document.createElement("span");
         span.className = "pdf-text-span";
-        span.textContent = it.str;
+        span.textContent = item.str;
         span.style.left = `${vx}px`;
         span.style.top = `${vy - fontSize}px`;
         span.style.fontSize = `${fontSize}px`;
-        span.style.lineHeight = "1";
-        span.style.fontFamily = it.fontName || "sans-serif";
+        span.style.fontFamily = item.fontName || "sans-serif";
+        span.style.lineHeight = `${fontSize}px`;
+        span.style.display = "inline-block";
+        span.style.width = `${advW}px`;
+        span.style.textAlign = "justify";
+        span.style.textAlignLast = "justify";
         textDiv.appendChild(span);
       }
     }
@@ -106,9 +113,20 @@ export function PDFViewer({ data, fileName, onClose }: PDFViewerProps) {
         setScale((s) => Math.max(0.5, Math.min(3, s - e.deltaY * 0.001)));
       }
     };
+    const handleCtx = (e: MouseEvent) => {
+      const sel = window.getSelection()?.toString().trim();
+      if (sel) {
+        e.preventDefault();
+        onSelectionContextMenu?.(e, sel);
+      }
+    };
     el.addEventListener("wheel", handleWheel, { passive: false });
-    return () => el.removeEventListener("wheel", handleWheel);
-  }, []);
+    el.addEventListener("contextmenu", handleCtx);
+    return () => {
+      el.removeEventListener("wheel", handleWheel);
+      el.removeEventListener("contextmenu", handleCtx);
+    };
+  }, [onSelectionContextMenu]);
 
   return (
     <div className="shrink-0 border-l bg-background flex flex-col h-full">
@@ -117,6 +135,9 @@ export function PDFViewer({ data, fileName, onClose }: PDFViewerProps) {
           <ExternalLink className="w-4 h-4 text-muted-foreground shrink-0" />
           <span className="text-sm font-medium truncate">{fileName}</span>
         </div>
+        {boundTermExists === false && onCreateBoundTerm && (
+          <button onClick={onCreateBoundTerm} className="text-xs text-primary hover:underline mr-2 shrink-0">创建绑定节点</button>
+        )}
         <div className="flex items-center gap-0.5 ml-2 shrink-0">
           <span className="text-xs text-muted-foreground mr-1">
             {pageNum} / {numPages}

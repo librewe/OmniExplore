@@ -17,7 +17,7 @@ import { Onboarding } from "@/components/Onboarding";
 import { treeReducer, getInitialTreeState, buildRootNode } from "@/store/treeStore";
 import { footprintReducer, initialState as initialFootprint } from "@/store/footprintStore";
 import { initializeConfig, useConfigStore } from "@/store/configStore";
-import { getConceptNode, getConceptNodeByTerm, putConceptNode, getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG, getAllFiles, putFile, deleteFile } from "@/services/cache";
+import { getConceptNode, getConceptNodeByTerm, putConceptNode, deleteConceptNode, getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG, getAllFiles, putFile, deleteFile } from "@/services/cache";
 import { streamLLM, LLMError } from "@/services/llm";
 import { getPresetPrompt, inquiryPrompt } from "@/services/prompts";
 import { extractTitle, cn } from "@/lib/utils";
@@ -130,17 +130,49 @@ export default function Home() {
   const [storedFiles, setStoredFiles] = useState<StoredFile[]>([]);
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [activePdf, setActivePdf] = useState<StoredFile | null>(null);
+  const [pdfBoundTerm, setPdfBoundTerm] = useState<string | null>(null);
+  const pdfBoundRef = useRef<string | null>(null);
+  useEffect(() => { pdfBoundRef.current = pdfBoundTerm; }, [pdfBoundTerm]);
+  const pdfBindingsRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    const saved = localStorage.getItem("pdf_bindings");
+    if (saved) {
+      try { pdfBindingsRef.current = new Map(JSON.parse(saved)); } catch {}
+    }
+  }, []);
+
+  const saveBindings = useCallback(() => {
+    localStorage.setItem("pdf_bindings", JSON.stringify([...pdfBindingsRef.current.entries()]));
+  }, []);
   const prevRightRef = useRef(288);
+  const hadPdfRef = useRef(false);
 
   useEffect(() => {
     if (activePdf) {
-      prevRightRef.current = rightWidth;
-      setRightCollapsed(false);
-      setRightWidth(Math.max(400, window.innerWidth * 0.45));
+      if (!hadPdfRef.current) {
+        prevRightRef.current = rightWidth;
+        hadPdfRef.current = true;
+        setRightCollapsed(false);
+        setRightWidth(Math.max(400, window.innerWidth * 0.45));
+      }
+      const termName = activePdf.name.replace(/\.[^.]+$/, "");
+      const boundName = pdfBindingsRef.current.get(activePdf.name);
+      if (boundName && termList.some((t) => t.toLowerCase() === boundName.toLowerCase())) {
+        setPdfBoundTerm(boundName);
+      } else if (termList.some((t) => t.toLowerCase() === termName.toLowerCase())) {
+        setPdfBoundTerm(termName);
+        pdfBindingsRef.current.set(activePdf.name, termName);
+        saveBindings();
+      } else {
+        setPdfBoundTerm(null);
+      }
     } else {
+      hadPdfRef.current = false;
       setRightWidth(prevRightRef.current);
+      setPdfBoundTerm(null);
     }
-  }, [activePdf]);
+  }, [activePdf, termList]);
 
   useEffect(() => {
     if (!toast) return;
@@ -421,12 +453,27 @@ export default function Home() {
 
       const id = SparkMD5.hash(term.toLowerCase());
       const cached = await getConceptNode(id);
+      const isNew = !cached;
 
       const rootNode = buildRootNode(term, "micro");
       dispatchTree({ type: "SET_ROOT", rootNode });
       dispatchTree({ type: "SET_ACTIVE_TAG", parentId: "root", title: term });
       setShowGuideMap(false);
       ensureGuideMap();
+
+      if (isNew) {
+        const group = workGroups.find((g) => g.id === activeGroupId);
+        if (group?.guide_map) {
+          const lower = term.toLowerCase();
+          const exists = group.guide_map.children.some((c) => c.term.toLowerCase() === lower);
+          if (!exists) {
+            group.guide_map = { ...group.guide_map, children: [...group.guide_map.children, { term, children: [] }] };
+            group.updated_at = Date.now();
+            putWorkGroup(group);
+            setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+          }
+        }
+      }
 
       if (cached?.custom_qa) {
         for (const qa of cached.custom_qa) {
@@ -873,12 +920,53 @@ export default function Home() {
 
   const handleRenameSubmit = useCallback(
     (nodeId: string, newTitle: string) => {
-      if (newTitle.trim()) {
-        dispatchTree({ type: "SET_NODE_TITLE", nodeId, title: newTitle.trim() });
+      if (!newTitle.trim()) { setRenamingNodeId(null); return; }
+      const node = findNode(nodeId);
+      if (node && node.type === "root") {
+        const newTerm = newTitle.trim();
+        if (node.term.toLowerCase() !== newTerm.toLowerCase() && termList.some((t) => t.toLowerCase() === newTerm.toLowerCase())) {
+          setToast(`"${newTerm}" 已存在`);
+          setRenamingNodeId(null);
+          return;
+        }
+      }
+      dispatchTree({ type: "SET_NODE_TITLE", nodeId, title: newTitle.trim() });
+      if (node && node.type === "root" && node.term !== newTitle.trim()) {
+        const oldTerm = node.term;
+        const oldId = SparkMD5.hash(oldTerm.toLowerCase());
+        const newTerm = newTitle.trim();
+        const newId = SparkMD5.hash(newTerm.toLowerCase());
+        setPreviewTitle(newTerm);
+        if (pdfBoundTerm === oldTerm) setPdfBoundTerm(newTerm);
+        getConceptNode(oldId).then(async (existing) => {
+          if (existing) {
+            existing.term = newTerm;
+            existing.id = newId;
+            putConceptNode(existing);
+            if (oldId !== newId) deleteConceptNode(oldId);
+          }
+          setTermList((prev) => {
+            const next = prev.map((t) => t.toLowerCase() === node.term.toLowerCase() ? newTerm : t);
+            localStorage.setItem(termListKey, JSON.stringify(next));
+            return next;
+          });
+          const group = workGroups.find((g) => g.id === activeGroupId);
+          if (group?.guide_map) {
+            const updateTerm = (n: GuideMapNode): GuideMapNode => ({
+              ...n,
+              term: n.term.toLowerCase() === node.term.toLowerCase() ? newTerm : n.term,
+              children: n.children.map(updateTerm),
+            });
+            group.guide_map = updateTerm(group.guide_map);
+            group.updated_at = Date.now();
+            putWorkGroup(group);
+            setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+          }
+        });
       }
       setRenamingNodeId(null);
     },
-    []
+    [findNode, termListKey, termList, activeGroupId, workGroups]
   );
 
   const handleDelete = useCallback(
@@ -1129,11 +1217,9 @@ export default function Home() {
       let added = false;
       if (path.length === 0) {
         const lower = term.trim().toLowerCase();
-        const exists = newTree.children.some((c) =>
-          c.term === "" ? c.children.some((cc) => cc.term.toLowerCase() === lower) : c.term.toLowerCase() === lower
-        );
+        const exists = newTree.children.some((c) => c.term.toLowerCase() === lower);
         if (!exists) {
-          newTree.children.push({ term: "", children: [newChild], _group: true });
+          newTree.children.push(newChild);
           added = true;
         }
       } else {
@@ -1176,7 +1262,17 @@ export default function Home() {
       await putWorkGroup(group);
       setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
     }
-  }, [activeGroupId, workGroups]);
+    if (treeState.rootTerm && group.guide_map) {
+      const lower = treeState.rootTerm.toLowerCase();
+      const exists = group.guide_map.children.some((c) => c.term.toLowerCase() === lower);
+      if (!exists) {
+        group.guide_map = { ...group.guide_map, children: [...group.guide_map.children, { term: treeState.rootTerm, children: [] }] };
+        group.updated_at = Date.now();
+        putWorkGroup(group);
+        setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+      }
+    }
+  }, [activeGroupId, workGroups, treeState.rootTerm]);
 
   const lastMapClickRef = useRef<{ term: string; time: number } | null>(null);
   const [guideFocusPath, setGuideFocusPath] = useState<number[]>([]);
@@ -1239,6 +1335,14 @@ export default function Home() {
       });
       setNavIndex((prev) => navPushedRef.current ? prev + 1 : prev);
     }, []);
+
+  const handleFileLink = useCallback(
+    (filename: string) => {
+      const file = storedFiles.find((f) => f.name === filename);
+      if (file) setActivePdf(file);
+    },
+    [storedFiles]
+  );
 
   const handleGuideMapUpdate = useCallback(
     async (node: GuideMapNode) => {
@@ -1365,11 +1469,14 @@ export default function Home() {
               onClick={() => {
                 dispatchTree({ type: "CLEAR_ROOT" });
                 dispatchFootprint({ type: "CLEAR" });
+                dispatchTree({ type: "SET_ACTIVE_TAG", parentId: "root", title: "" });
+                setShowGuideMap(false);
+                setFillValue("");
               }}
               className="w-full flex items-center justify-center gap-1 rounded-md border border-dashed border-muted-foreground/30 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>新建术语</span>
+              <span>新建节点</span>
             </button>
           </div>
           <div className="px-3 py-2 shrink-0">
@@ -1378,13 +1485,13 @@ export default function Home() {
               <input
                 value={sidebarSearch}
                 onChange={(e) => setSidebarSearch(e.target.value)}
-                placeholder={leftTab === "terms" ? "搜索术语…" : "搜索文件…"}
+                placeholder={leftTab === "terms" ? "搜索节点…" : "搜索文件…"}
                 className="w-full h-8 rounded-md border border-input bg-transparent pl-8 pr-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               />
             </div>
           </div>
           <div className="flex items-center gap-4 px-4 pb-1.5 shrink-0">
-            <button onClick={() => setLeftTab("terms")} className={cn("text-[13px] font-semibold", leftTab === "terms" ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>术语</button>
+            <button onClick={() => setLeftTab("terms")} className={cn("text-[13px] font-semibold", leftTab === "terms" ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>节点</button>
             <button onClick={() => setLeftTab("files")} className={cn("text-[13px] font-semibold", leftTab === "files" ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>文件</button>
           </div>
           <div className="flex-1 overflow-hidden px-4">
@@ -1394,12 +1501,66 @@ export default function Home() {
               currentTerm={treeState.rootTerm}
               search={leftTab === "terms" ? sidebarSearch : undefined}
               onTermClick={handleFocusTerm}
-              onTermDelete={(term) => saveTermList(termList.filter((t) => t !== term))}
+              onTermDelete={(term) => {
+                saveTermList(termList.filter((t) => t !== term));
+                if (activePdf && term.toLowerCase() === activePdf.name.replace(/\.[^.]+$/, "").toLowerCase()) {
+                  setPdfBoundTerm(null);
+                  pdfBindingsRef.current.delete(activePdf.name);
+                  saveBindings();
+                }
+                if (treeState.rootTerm === term) {
+                  dispatchTree({ type: "CLEAR_ROOT" });
+                  dispatchFootprint({ type: "CLEAR" });
+                  setPreviewTitle("");
+                  setPreviewContent(null);
+                }
+                const group = workGroups.find((g) => g.id === activeGroupId);
+                if (group?.guide_map) {
+                  const removeFrom = (n: GuideMapNode): GuideMapNode => ({
+                    ...n,
+                    children: n.children.filter((c) => c.term.toLowerCase() !== term.toLowerCase()).map(removeFrom),
+                  });
+                  const cleaned = removeFrom(group.guide_map);
+                  if (JSON.stringify(cleaned) !== JSON.stringify(group.guide_map)) {
+                    group.guide_map = cleaned;
+                    group.updated_at = Date.now();
+                    putWorkGroup(group);
+                    setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+                  }
+                }
+              }}
               onTermRename={(oldTerm, newTerm) => {
                 if (!newTerm || oldTerm === newTerm) return;
                 saveTermList(termList.map((t) => t === oldTerm ? newTerm : t));
                 if (treeState.rootTerm === oldTerm) {
-                  handleFocusTerm(newTerm);
+        if (pdfBoundRef.current === oldTerm) {
+          setPdfBoundTerm(newTerm);
+          pdfBindingsRef.current.forEach((v, k) => { if (v === oldTerm) pdfBindingsRef.current.set(k, newTerm); });
+          saveBindings();
+        }
+                  setPreviewTitle(newTerm);
+                  const oldId = SparkMD5.hash(oldTerm.toLowerCase());
+                  const newId = SparkMD5.hash(newTerm.toLowerCase());
+                  getConceptNode(oldId).then(async (existing) => {
+                    if (existing) {
+                      existing.term = newTerm;
+                      existing.id = newId;
+                      putConceptNode(existing);
+                      if (oldId !== newId) deleteConceptNode(oldId);
+                    }
+                    const group = workGroups.find((g) => g.id === activeGroupId);
+                    if (group?.guide_map) {
+                      const updateTerm = (n: GuideMapNode): GuideMapNode => ({
+                        ...n, term: n.term.toLowerCase() === oldTerm.toLowerCase() ? newTerm : n.term,
+                        children: n.children.map(updateTerm),
+                      });
+                      group.guide_map = updateTerm(group.guide_map);
+                      group.updated_at = Date.now();
+                      putWorkGroup(group);
+                      setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+                    }
+                  });
+                  dispatchTree({ type: "SET_NODE_TITLE", nodeId: "root", title: newTerm });
                 }
               }}
               onNewTerm={() => {
@@ -1422,11 +1583,9 @@ export default function Home() {
                   let added = false;
                   if (path.length === 0) {
                     const lower = term.trim().toLowerCase();
-                    const exists = newTree.children.some((c) =>
-                      c.term === "" ? c.children.some((cc) => cc.term.toLowerCase() === lower) : c.term.toLowerCase() === lower
-                    );
+                    const exists = newTree.children.some((c) => c.term.toLowerCase() === lower);
                     if (!exists) {
-                      newTree.children.push({ term: "", children: [newChild], _group: true });
+                      newTree.children.push(newChild);
                       added = true;
                     }
                   } else {
@@ -1462,7 +1621,13 @@ export default function Home() {
             ) : (
             <FilesList
               files={storedFiles}
-              onFileClick={setActivePdf}
+              onFileClick={(file) => {
+                setActivePdf(file);
+                if (!treeState.rootTerm) {
+                  const bound = pdfBindingsRef.current.get(file.name);
+                  handleFocusTerm(bound || file.name.replace(/\.[^.]+$/, ""));
+                }
+              }}
               search={leftTab === "files" ? sidebarSearch : undefined}
               onUpload={async (f) => { await putFile(f); setStoredFiles((prev) => [...prev, f]); }}
               onDelete={async (id) => { await deleteFile(id); setStoredFiles((prev) => prev.filter((f) => f.id !== id)); }}
@@ -1578,7 +1743,7 @@ export default function Home() {
               <span className="font-semibold text-base">{activeGroup?.name || "OmniExplore"}</span>
               {showGuideMap && (
                 <span className="text-xs text-muted-foreground bg-accent rounded px-2 py-0.5">
-                  导图模式 · Esc 返回
+                  组合视图 · Esc 返回
                 </span>
               )}
               <div className="flex-1" />
@@ -1603,7 +1768,7 @@ export default function Home() {
                   <button
                     onClick={() => { ensureGuideMap(); setShowGuideMap(true); }}
                     className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
-                    title="进入导图视图"
+                    title="进入组合视图"
                   >
                     <Layers className="w-4 h-4" />
                     <span className="text-xs">组合</span>
@@ -1720,6 +1885,7 @@ export default function Home() {
                 onSelectionContextMenu={handleSelectionContextMenu}
                 onTermHover={handleTermHover}
                 onTermLeave={handleTermLeave}
+                onFileLink={handleFileLink}
                 termPreview={hoverTermPreview}
                 termPreviewAnchor={hoverTermPreviewAnchor}
                 termPreviewTerm={hoverTermPreviewTerm}
@@ -1735,7 +1901,7 @@ export default function Home() {
             )}
 
               <InputBar
-                tagLabel={showGuideMap ? "在当前图层新增根节点" : treeState.activeTag.title}
+                tagLabel={showGuideMap ? "在当前层级新增节点" : treeState.activeTag.title}
                 tagPrefix={showGuideMap ? "" : undefined}
                 fillValue={fillValue}
               onFocus={(text) => { setFillValue(""); handleFocusTerm(text); }}
@@ -1759,7 +1925,17 @@ export default function Home() {
         )}
             <div style={{ width: rightCollapsed ? 0 : rightWidth }} className={cn("shrink-0", !isResizing && "transition-[width] duration-300 ease-in-out", !activePdf && "overflow-hidden")}>
         {activePdf ? (
-          <PDFViewer data={activePdf.data} fileName={activePdf.name} onClose={() => setActivePdf(null)} />
+          <PDFViewer data={activePdf.data} fileName={activePdf.name} onClose={() => setActivePdf(null)}
+            boundTermExists={pdfBoundTerm !== null}
+            onCreateBoundTerm={() => {
+              const termName = activePdf.name.replace(/\.[^.]+$/, "");
+              handleFocusTerm(termName);
+              setPdfBoundTerm(termName);
+              pdfBindingsRef.current.set(activePdf.name, termName);
+              saveBindings();
+            }}
+            onSelectionContextMenu={(e, sel) => handleSelectionContextMenu(e as any, sel, "root")}
+          />
         ) : (
         <PreviewPanel
           termName={previewTitle}

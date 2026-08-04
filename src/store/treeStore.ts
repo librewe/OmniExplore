@@ -161,12 +161,15 @@ export function treeReducer(state: TreeState, action: TreeAction): TreeState {
 
     case "SET_NODE_TITLE":
       if (!state.rootNode) return state;
+      const isRoot = action.nodeId === "root";
       return {
         ...state,
         rootNode: updateNode(state.rootNode, action.nodeId, (node) => ({
           ...node,
           title: action.title,
+          ...(isRoot ? { term: action.title } : {}),
         })),
+        ...(isRoot ? { rootTerm: action.title } : {}),
       };
 
     case "ADD_CHILD":

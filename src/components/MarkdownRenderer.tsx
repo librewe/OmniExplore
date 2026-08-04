@@ -10,6 +10,7 @@ interface MarkdownRendererProps {
   content: string;
   className?: string;
   inline?: boolean;
+  onFileLink?: (filename: string) => void;
 }
 
 function InlineP({ children }: { children?: React.ReactNode }) {
@@ -28,10 +29,20 @@ function CodeBlock({ className: codeClass, children, ...props }: Record<string, 
   return <code className={codeClass as string} {...props}>{children as React.ReactNode}</code>;
 }
 
-export function MarkdownRenderer({ content, className, inline }: MarkdownRendererProps) {
+export function MarkdownRenderer({ content, className, inline, onFileLink }: MarkdownRendererProps) {
   const comps = {
     code: CodeBlock,
     p: inline ? InlineP : BlockP,
+    a: ({ href, children, ...props }: { href?: string; children?: React.ReactNode }) => {
+      if (href?.startsWith("./files/")) {
+        return (
+          <span className="text-primary underline cursor-pointer" onClick={(e) => { e.preventDefault(); onFileLink?.(href.replace("./files/", "")); }}>
+            {children}
+          </span>
+        );
+      }
+      return <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary underline" {...props}>{children}</a>;
+    },
   };
 
   return (

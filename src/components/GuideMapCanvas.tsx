@@ -236,6 +236,17 @@ export function GuideMapCanvas({
     return focusedNode?.children ?? [];
   }, [guideMap, focusedNode, focusPath]);
 
+  const termCount = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!guideMap) return map;
+    const walk = (n: GuideMapNode) => {
+      if (n.term && !n._group) map.set(n.term.toLowerCase(), (map.get(n.term.toLowerCase()) || 0) + 1);
+      n.children.forEach(walk);
+    };
+    walk(guideMap);
+    return map;
+  }, [guideMap]);
+
   const handleFocus = useCallback((newPath: NodePath) => {
     setFocusPath(newPath);
     setSelectedPath(null);
@@ -471,7 +482,7 @@ export function GuideMapCanvas({
 
           <div className="flex items-center gap-2 ml-auto">
             {onRebuild && (
-              <button onClick={() => onRebuild(focusPath)} className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors" title="从术语库重建">
+              <button onClick={() => onRebuild(focusPath)} className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors" title="从节点库重建">
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 2v6h-6M3 12a9 9 0 0115.36-6.36L21 8M3 22v-6h6M21 12a9 9 0 01-15.36 6.36L3 16"/></svg>
                 <span>重建</span>
               </button>
@@ -488,7 +499,7 @@ export function GuideMapCanvas({
             {visibleNodes.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-64 gap-3 pointer-events-auto">
                 <FolderOpen className="w-10 h-10 text-muted-foreground/30" />
-                <p className="text-sm text-muted-foreground">{focusPath.length > 0 ? "此分组下暂无节点" : "在输入框输入术语名创建图节点"}</p>
+                <p className="text-sm text-muted-foreground">{focusPath.length > 0 ? "此分组下暂无节点" : "创建节点以构造组"}</p>
               </div>
             ) : (
               <div className="flex flex-wrap gap-4 justify-start items-start relative z-10 pointer-events-none">
@@ -500,6 +511,8 @@ export function GuideMapCanvas({
                       node={node}
                       path={cardPath}
                       depth={0}
+                      parent={guideMap}
+                      termCount={termCount}
                       selectedPathId={selectedPath ? pathToId(selectedPath) : null}
                       termList={termList}
                       currentFocusTerm={currentFocusTerm}
@@ -548,6 +561,7 @@ function NodeCard({
   onNodeClick, onUpdateNode, onDissolveGroup, onEnterFocus,
   editingNodePath, editText, onStartEdit, onEditChange, onCommitEdit,
   addingToPath, newChildText, onStartAdd, onNewChildChange, onCommitAdd,
+  parent, termCount,
 }: {
   node: GuideMapNode; path: NodePath; depth: number;   selectedPathId: string | null;
   termList: string[]; currentFocusTerm: string;
@@ -561,12 +575,16 @@ function NodeCard({
   addingToPath: string | null; newChildText: string;
   onStartAdd: (path: NodePath) => void;
   onNewChildChange: (text: string) => void; onCommitAdd: () => void;
+  parent?: GuideMapNode;
+  termCount?: Map<string, number>;
 }) {
   const id = pathToId(path);
   const hasChildren = node.children.length > 0;
   const isGroup = !!node._group || hasChildren || node.term === "";
   const isFocused = currentFocusTerm.toLowerCase() === node.term.toLowerCase();
   const isEditing = editingNodePath === id;
+  const soleChild = parent && parent.children.length === 1 && !isGroup;
+  const termOnlyOnce = !isGroup && node.term && (termCount?.get(node.term.toLowerCase()) ?? 0) <= 1;
   const isAdding = addingToPath === id;
   const isSelected = selectedPathId === id;
   const [cardHovered, setCardHovered] = useState(false);
@@ -604,7 +622,9 @@ function NodeCard({
           onClick={(e) => { if (!isEditing) { e.stopPropagation(); onNodeClick(path, node.term, isGroup); } }}
         >
           <div className="flex items-center gap-1.5 px-3 py-2">
-            <Layers className="w-3 h-3 text-muted-foreground/50 shrink-0" />
+            {isGroup ? (
+              <Layers className="w-3 h-3 text-muted-foreground/50 shrink-0" />
+            ) : null}
             {isFocused && !isGroup && <Circle className="w-3 h-3 text-primary fill-primary shrink-0" />}
 
             {isEditing ? (
@@ -640,9 +660,9 @@ function NodeCard({
                 ) : (
                   <button onClick={(e) => { e.stopPropagation(); onUpdateNode(path, null); }} className="p-0.5 rounded hover:bg-accent transition-colors" title="删除"><Trash2 className="w-3 h-3 text-destructive" /></button>
                 )
-              ) : (
+              ) : !soleChild && !termOnlyOnce ? (
                 <button onClick={(e) => { e.stopPropagation(); onUpdateNode(path, null); }} className="p-0.5 rounded hover:bg-accent transition-colors" title="删除"><Trash2 className="w-3 h-3 text-destructive" /></button>
-              )}
+              ) : null}
               {isGroup && (
                 <button onClick={(e) => { e.stopPropagation(); onEnterFocus(path); }} className="p-0.5 rounded hover:bg-accent transition-colors" title="聚焦此分组"><FolderOpen className="w-3 h-3 text-muted-foreground" /></button>
               )}
@@ -661,6 +681,8 @@ function NodeCard({
                 <NodeCard
                   key={pathToId([...path, i])}
                   node={child} path={[...path, i]} depth={depth + 1}
+                  parent={node}
+                  termCount={termCount}
                   selectedPathId={selectedPathId}
                   termList={termList} currentFocusTerm={currentFocusTerm}
                   onNodeClick={onNodeClick} onUpdateNode={onUpdateNode} onDissolveGroup={onDissolveGroup} onEnterFocus={onEnterFocus}

@@ -25,11 +25,22 @@ function matchFreeTerms(text: string, termList: string[]): ParsedSegment[] {
   const sorted = [...termList].sort((a, b) => b.length - a.length);
   const escaped = sorted.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   const regex = new RegExp(`(${escaped.join("|")})`, "gi");
+  const mdLinkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+
+  const protectedRegions: { start: number; end: number }[] = [];
+  for (const m of text.matchAll(mdLinkRegex)) {
+    protectedRegions.push({ start: m.index!, end: m.index! + m[0].length });
+  }
+
+  function isProtected(idx: number): boolean {
+    return protectedRegions.some((r) => idx >= r.start && idx < r.end);
+  }
 
   const segments: ParsedSegment[] = [];
   let lastIndex = 0;
 
   for (const match of text.matchAll(regex)) {
+    if (isProtected(match.index!)) continue;
     if (match.index! > lastIndex) {
       segments.push({ type: "text", content: text.slice(lastIndex, match.index!) });
     }

@@ -44,6 +44,11 @@ export async function putConceptNode(node: ConceptNode): Promise<void> {
   await db.put("concept_nodes", { ...node, updated_at: Date.now() });
 }
 
+export async function deleteConceptNode(id: string): Promise<void> {
+  const db = await getDB();
+  await db.delete("concept_nodes", id);
+}
+
 export async function getAllConceptNodes(): Promise<ConceptNode[]> {
   const db = await getDB();
   return db.getAll("concept_nodes");

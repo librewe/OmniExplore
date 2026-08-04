@@ -28,6 +28,7 @@ interface RecursiveTreeProps {
   onSelectionContextMenu: (e: React.MouseEvent, selectedText: string, nodeId: string) => void;
   onTermHover?: (e: React.MouseEvent, term: string) => void;
   onTermLeave?: () => void;
+  onFileLink?: (filename: string) => void;
   termPreview: string | null;
   termPreviewAnchor: DOMRect | null;
   termPreviewTerm: string;
@@ -56,6 +57,7 @@ export function RecursiveTree({
   onSelectionContextMenu,
   onTermHover,
   onTermLeave,
+  onFileLink,
   termPreview,
   termPreviewAnchor,
   termPreviewTerm,
@@ -185,6 +187,7 @@ export function RecursiveTree({
             onTermContextMenu={onTermContextMenu}
             onTermHover={handleTermHover}
             onTermLeave={handleTermLeaveLocal}
+            onFileLink={onFileLink}
             onPlusSelect={onPlusSelect}
             onCreateEmptyChild={onCreateEmptyChild}
             onEditContent={onEditContent}
