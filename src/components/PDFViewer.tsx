@@ -11,11 +11,11 @@ interface PDFViewerProps {
   fileName: string;
   onClose: () => void;
   onSelectionContextMenu?: (e: MouseEvent, selectedText: string) => void;
-  onCreateBoundTerm?: () => void;
-  boundTermExists?: boolean;
+  onCreateBoundNode?: () => void;
+  boundNodeExists?: boolean;
 }
 
-export function PDFViewer({ data, fileName, onClose, onSelectionContextMenu, onCreateBoundTerm, boundTermExists }: PDFViewerProps) {
+export function PDFViewer({ data, fileName, onClose, onSelectionContextMenu, onCreateBoundNode, boundNodeExists }: PDFViewerProps) {
   const [numPages, setNumPages] = useState(0);
   const [pageNum, setPageNum] = useState(1);
   const [scale, setScale] = useState(1.2);
@@ -135,8 +135,8 @@ export function PDFViewer({ data, fileName, onClose, onSelectionContextMenu, onC
           <ExternalLink className="w-4 h-4 text-muted-foreground shrink-0" />
           <span className="text-sm font-medium truncate">{fileName}</span>
         </div>
-        {boundTermExists === false && onCreateBoundTerm && (
-          <button onClick={onCreateBoundTerm} className="text-xs text-primary hover:underline mr-2 shrink-0">创建绑定节点</button>
+        {boundNodeExists === false && onCreateBoundNode && (
+          <button onClick={onCreateBoundNode} className="text-xs text-primary hover:underline mr-2 shrink-0">创建绑定节点</button>
         )}
         <div className="flex items-center gap-0.5 ml-2 shrink-0">
           <span className="text-xs text-muted-foreground mr-1">

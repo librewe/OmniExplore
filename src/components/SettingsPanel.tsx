@@ -16,8 +16,8 @@ import type { LLMConfig } from "@/types";
 import { cn } from "@/lib/utils";
 
 interface SettingsPanelProps {
-  termList: string[];
-  onTermDelete: (term: string) => void;
+  nodeTitles: string[];
+  onNodeDelete: (title: string) => void;
   plusMenuItems: Array<{ id: string; label: string; prompt: string }>;
   onPlusMenuItemsChange: (items: Array<{ id: string; label: string; prompt: string }>) => void;
   selectionMenuItems: Array<{ id: string; label: string; prompt: string }>;
@@ -25,8 +25,8 @@ interface SettingsPanelProps {
 }
 
 export function SettingsPanel({
-  termList,
-  onTermDelete,
+  nodeTitles,
+  onNodeDelete,
   plusMenuItems,
   onPlusMenuItemsChange,
   selectionMenuItems,
@@ -44,7 +44,7 @@ export function SettingsPanel({
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const [termSearch, setTermSearch] = useState("");
+  const [nodeSearch, setNodeSearch] = useState("");
 
   const [editingMenuItem, setEditingMenuItem] = useState<string | null>(null);
   const [editMenuLabel, setEditMenuLabel] = useState("");
@@ -121,9 +121,9 @@ export function SettingsPanel({
 
   const getDefaultFor = (key: string) => PRESET_DEFAULTS[key] || { system: "", user: "" };
 
-  const filteredTerms = termSearch
-    ? termList.filter((t) => t.toLowerCase().includes(termSearch.toLowerCase()))
-    : termList;
+  const filteredNodes = nodeSearch
+    ? nodeTitles.filter((t) => t.toLowerCase().includes(nodeSearch.toLowerCase()))
+    : nodeTitles;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -142,7 +142,7 @@ export function SettingsPanel({
             <TabsTrigger value="presets" className="w-full justify-start text-sm">预设提示词</TabsTrigger>
             <TabsTrigger value="templates" className="w-full justify-start text-sm">新建菜单</TabsTrigger>
             <TabsTrigger value="selmenu" className="w-full justify-start text-sm">划词菜单</TabsTrigger>
-            <TabsTrigger value="terms" className="w-full justify-start text-sm">术语库</TabsTrigger>
+            <TabsTrigger value="terms" className="w-full justify-start text-sm">节点库</TabsTrigger>
           </TabsList>
 
           <div className="flex-1 overflow-auto">
@@ -224,7 +224,7 @@ export function SettingsPanel({
 
             <TabsContent value="presets" className="p-6 m-0">
               <div className="space-y-3">
-                <p className="text-sm text-muted-foreground">自定义微观四个预设问题的提示词。{"${term}"} 在运行时替换为术语名。</p>
+                <p className="text-sm text-muted-foreground">自定义预设问题的提示词。{"${term}"} 在运行时替换为节点名称。</p>
                 {["micro_intuition", "micro_definition", "micro_application", "micro_motivation"].map((key) => {
                   const override = presetOverrides[key];
                   return (
@@ -256,7 +256,7 @@ export function SettingsPanel({
                             />
                           </div>
                           <div>
-                            <label className="text-xs text-muted-foreground">User Prompt（{"${term}"} = 术语名）</label>
+                            <label className="text-xs text-muted-foreground">User Prompt（{"${term}"} = 节点名称）</label>
                             <textarea
                               value={editPresetUser}
                               onChange={(e) => setEditPresetUser(e.target.value)}
@@ -372,7 +372,7 @@ export function SettingsPanel({
                       const newItem = {
                         id: `menu_${Date.now()}`,
                         label: newMenuLabel.trim(),
-                        prompt: newMenuPrompt.trim() || "${term}是什么？",
+                        prompt: newMenuPrompt.trim() || "${term}",
                       };
                       onPlusMenuItemsChange([...plusMenuItems, newItem]);
                       setNewMenuLabel("");
@@ -388,7 +388,7 @@ export function SettingsPanel({
             <TabsContent value="selmenu" className="p-6 m-0">
               <div className="space-y-4">
                 <p className="text-sm text-muted-foreground">
-                  配置划词右键菜单中的追问模板。{"${selected}"} 替换为选中文本，{"${root}"} 替换为当前节点。
+                  配置划词右键菜单中的追问模板。{"${selected}"} 替换为选中文本，{"${node}"} 替换为当前节点。
                 </p>
 
                 {selectionMenuItems.map((item) => (
@@ -404,7 +404,7 @@ export function SettingsPanel({
                         <Input
                           value={editSelPrompt}
                           onChange={(e) => setEditSelPrompt(e.target.value)}
-                          placeholder={"提示词（用 ${selected} / ${root} 占位）"}
+                          placeholder={"提示词（用 ${selected} / ${node} 占位）"}
                           className="text-sm"
                         />
                         <div className="flex gap-2">
@@ -468,7 +468,7 @@ export function SettingsPanel({
                   <Input
                     value={newSelPrompt}
                     onChange={(e) => setNewSelPrompt(e.target.value)}
-                    placeholder={"提示词（用 ${selected} / ${root} 占位）"}
+                    placeholder={"提示词（用 ${selected} / ${node} 占位）"}
                     className="text-sm"
                   />
                   <Button
@@ -521,23 +521,23 @@ export function SettingsPanel({
                 <div className="relative">
                   <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                   <Input
-                    value={termSearch}
-                    onChange={(e) => setTermSearch(e.target.value)}
-                    placeholder="搜索术语…"
+                    value={nodeSearch}
+                    onChange={(e) => setNodeSearch(e.target.value)}
+                    placeholder="搜索节点…"
                     className="pl-8 text-sm"
                   />
                 </div>
-                {filteredTerms.length === 0 ? (
-                  <p className="text-sm text-muted-foreground text-center py-8">暂无术语</p>
+                {filteredNodes.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-8">暂无节点</p>
                 ) : (
                   <div className="space-y-1">
-                    {filteredTerms.map((term) => (
+                    {filteredNodes.map((term) => (
                       <div key={term} className="flex items-center justify-between rounded-md px-2 py-1.5 hover:bg-accent">
                         <span className="text-sm">{term}</span>
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => onTermDelete(term)}
+                          onClick={() => onNodeDelete(term)}
                         >
                           <Trash2 className="w-3.5 h-3.5 text-destructive" />
                         </Button>

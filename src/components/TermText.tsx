@@ -2,7 +2,7 @@
 
 import { memo, useCallback } from "react";
 import { parseTerms, parseWithTermList } from "@/services/termParser";
-import { useTermList } from "@/lib/TermListContext";
+import { useNodeList } from "@/lib/NodeListContext";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { cn } from "@/lib/utils";
 
@@ -25,7 +25,7 @@ export const TermText = memo(function TermText({
   onFileLink,
   className,
 }: TermTextProps) {
-  const termList = useTermList();
+  const termList = useNodeList();
   const segments = termList.length ? parseWithTermList(content, termList) : parseTerms(content);
 
   const handleDoubleClick = useCallback(

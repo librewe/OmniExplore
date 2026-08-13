@@ -16,6 +16,16 @@ export async function* streamLLM(
   systemPrompt: string,
   userPrompt: string
 ): AsyncGenerator<string> {
+  return yield* streamLLMChat(config, [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt },
+  ]);
+}
+
+export async function* streamLLMChat(
+  config: LLMConfig,
+  messages: { role: string; content: string }[]
+): AsyncGenerator<string> {
   const controller = new AbortController();
   const connectTimeout = setTimeout(() => controller.abort(), STREAMING_TIMEOUT_MS);
 
@@ -29,10 +39,7 @@ export async function* streamLLM(
       },
       body: JSON.stringify({
         model: config.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
+        messages,
         max_tokens: config.max_tokens,
         temperature: config.temperature,
         stream: true,

@@ -68,18 +68,3 @@ export function parseWithTermList(text: string, termList: string[]): ParsedSegme
   }
   return result;
 }
-
-export function annotateTerms(text: string, termList: string[]): string {
-  if (!termList.length) return text;
-
-  const sorted = [...termList].sort((a, b) => b.length - a.length);
-  let result = text;
-
-  for (const term of sorted) {
-    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(`(?<!\\[\\[)${escaped}(?!\\]\\])`, "gi");
-    result = result.replace(regex, `[[${term}]]`);
-  }
-
-  return result;
-}

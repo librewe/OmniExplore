@@ -1,66 +1,43 @@
 "use client";
 
-import { Search, X, Pencil, Plus } from "lucide-react";
+import { X, Pencil, Plus } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 
-interface TermLibraryProps {
-  terms: string[];
-  currentTerm: string;
-  onTermClick: (term: string) => void;
-  onTermDelete: (term: string) => void;
-  onTermRename: (oldTerm: string, newTerm: string) => void;
-  onNewTerm: () => void;
+interface NodeLibraryProps {
+  nodeTitles: string[];
+  currentNodeTitle: string;
+  onNodeClick: (title: string) => void;
+  onNodeDelete: (title: string) => void;
+  onNodeRename: (oldTitle: string, newTitle: string) => void;
   showGuideMap?: boolean;
-  onAddToGuideMap?: (term: string) => void;
+  onAddToGuideMap?: (title: string) => void;
   search?: string;
 }
 
-export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onTermRename, onNewTerm, showGuideMap, onAddToGuideMap, search: externalSearch }: TermLibraryProps) {
-  const [internalSearch, setInternalSearch] = useState("");
-  const search = externalSearch ?? internalSearch;
-  const [renamingTerm, setRenamingTerm] = useState<string | null>(null);
+export function NodeLibrary({ nodeTitles, currentNodeTitle, onNodeClick, onNodeDelete, onNodeRename, showGuideMap, onAddToGuideMap, search }: NodeLibraryProps) {
+  const [renamingNode, setRenamingNode] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
   const filtered = search
-    ? terms.filter((t) => t.toLowerCase().includes(search.toLowerCase()))
-    : terms;
+    ? nodeTitles.filter((t) => t.toLowerCase().includes(search.toLowerCase()))
+    : nodeTitles;
 
   return (
     <div className="flex flex-col h-full">
-      {externalSearch === undefined && (
-      <div className="px-3 py-2 border-b">
-        <div className="relative">
-          <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <input
-            value={internalSearch}
-            onChange={(e) => setInternalSearch(e.target.value)}
-            placeholder="搜索节点…"
-            className="w-full h-8 rounded-md border border-input bg-transparent pl-8 pr-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          />
-        </div>
-        <button
-          onClick={onNewTerm}
-          className="mt-1.5 w-full flex items-center justify-center gap-1 rounded-md border border-dashed border-muted-foreground/30 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          <span>新建节点</span>
-        </button>
-      </div>
-      )}
       <div className="flex-1 overflow-auto py-1">
         {filtered.length === 0 ? (
           <p className="text-xs text-muted-foreground text-center py-6">
             {search ? "未找到" : "暂无节点"}
           </p>
         ) : (
-          filtered.map((term) => {
-            const isActive = term.toLowerCase() === currentTerm.toLowerCase();
-            const isRenaming = renamingTerm === term;
+          filtered.map((title) => {
+            const isActive = title.toLowerCase() === currentNodeTitle.toLowerCase();
+            const isRenaming = renamingNode === title;
             return (
               <div
-                key={term}
-                onClick={() => onTermClick(term)}
+                key={title}
+                onClick={() => onNodeClick(title)}
                 className={cn(
                   "flex items-center w-full px-3 py-1.5 text-sm transition-colors group cursor-pointer",
                   isActive
@@ -74,23 +51,21 @@ export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onT
                     onChange={(e) => setRenameValue(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
-                        onTermRename(term, renameValue.trim());
-                        setRenamingTerm(null);
+                        onNodeRename(title, renameValue.trim());
+                        setRenamingNode(null);
                       }
-                      if (e.key === "Escape") setRenamingTerm(null);
+                      if (e.key === "Escape") setRenamingNode(null);
                     }}
                     onBlur={() => {
-                      if (renameValue.trim()) onTermRename(term, renameValue.trim());
-                      setRenamingTerm(null);
+                      if (renameValue.trim()) onNodeRename(title, renameValue.trim());
+                      setRenamingNode(null);
                     }}
                     className="flex-1 h-6 rounded border border-input bg-background px-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
                     autoFocus
                   />
                 ) : (
-                  <button
-                    className="truncate flex-1 text-left pointer-events-none"
-                  >
-                    {term}
+                  <button className="truncate flex-1 text-left pointer-events-none">
+                    {title}
                   </button>
                 )}
                 {!isRenaming && (
@@ -99,7 +74,7 @@ export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onT
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          onAddToGuideMap(term);
+                          onAddToGuideMap(title);
                         }}
                         className="p-0.5 rounded hover:bg-accent"
                         title="添加到当前导图层"
@@ -110,8 +85,8 @@ export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onT
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        setRenamingTerm(term);
-                        setRenameValue(term);
+                        setRenamingNode(title);
+                        setRenameValue(title);
                       }}
                       className="p-0.5 rounded hover:bg-accent"
                     >
@@ -120,7 +95,7 @@ export function TermLibrary({ terms, currentTerm, onTermClick, onTermDelete, onT
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (confirm(`确定删除节点"${term}"？`)) onTermDelete(term);
+                        if (confirm(`确定删除节点"${title}"？`)) onNodeDelete(title);
                       }}
                       className="p-0.5 rounded hover:bg-destructive/10"
                     >

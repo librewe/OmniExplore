@@ -46,7 +46,7 @@ export function PlusMenu({ items, onSelect, onCreateEmpty }: PlusMenuProps) {
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
           >
             <Plus className="w-4 h-4" />
-            <span>创建空子节点</span>
+            <span>新增上下文</span>
           </button>
           <div className="my-1 h-px bg-border" />
           {items.map((item) => (

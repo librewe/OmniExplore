@@ -1,6 +1,6 @@
 "use client";
 
-import { Focus, Plus, Pencil, Trash2, ChevronDown, ChevronUp } from "lucide-react";
+import { useRef, useEffect } from "react";
 
 interface MenuItem {
   icon: React.ReactNode;
@@ -38,46 +38,22 @@ export function ContextMenuContent({ items, onClose }: { items: MenuItem[]; onCl
   );
 }
 
-export function nodeMenuItems(
-  expanded: boolean,
-  onEdit: () => void,
-  onToggleExpand: () => void,
-  onCreateEmpty: () => void,
-  onDelete: () => void
-): MenuItem[] {
-  return [
-    { icon: <Plus className="w-4 h-4" />, label: "新增空子节点", onClick: onCreateEmpty },
-    { icon: <Pencil className="w-4 h-4" />, label: "编辑", onClick: onEdit },
-    {
-      icon: expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />,
-      label: expanded ? "收起" : "展开",
-      onClick: onToggleExpand,
-    },
-    { icon: <Trash2 className="w-4 h-4" />, label: "删除", onClick: onDelete, danger: true },
-  ];
-}
+export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
 
-export function rootMenuItems(
-  onRename: () => void,
-  onCreateEmpty: () => void
-): MenuItem[] {
-  return [
-    { icon: <Plus className="w-4 h-4" />, label: "新增空子节点", onClick: onCreateEmpty },
-    { icon: <Pencil className="w-4 h-4" />, label: "重命名", onClick: onRename },
-  ];
-}
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        onClose();
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [onClose]);
 
-export function selectionMenuItems(
-  onFocus: () => void,
-  customItems: { label: string; prompt: string }[],
-  onCreateFromSelection: (prompt: string) => void
-): MenuItem[] {
-  return [
-    { icon: <Focus className="w-4 h-4" />, label: "聚焦", onClick: onFocus },
-    ...customItems.map((item) => ({
-      icon: <Plus className="w-4 h-4" />,
-      label: item.label,
-      onClick: () => onCreateFromSelection(item.prompt),
-    })),
-  ];
+  return (
+    <div ref={ref} className="fixed z-50" style={{ left: x, top: y }}>
+      <ContextMenuContent items={items} />
+    </div>
+  );
 }

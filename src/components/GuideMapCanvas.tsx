@@ -188,7 +188,7 @@ export function GuideMapCanvas({
   useEffect(() => {
     if (!navigatedRef.current) { navigatedRef.current = true; return; }
     if (!onNavigate) return;
-    const parts: string[] = ["根"];
+    const parts: string[] = ["簇"];
     if (focusPath.length > 0 && guideMap) {
       for (let i = 0; i < focusPath.length; i++) {
         const node = getNodeByPath(guideMap, focusPath.slice(0, i + 1));
@@ -471,7 +471,7 @@ export function GuideMapCanvas({
           </div>
 
           <div className="flex items-center gap-0.5 ml-3">
-              <button onClick={() => setFocusPath([])} className={cn("text-xs px-1 py-0.5 rounded transition-colors", focusPath.length === 0 ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground")}>根</button>
+              <button onClick={() => setFocusPath([])} className={cn("text-xs px-1 py-0.5 rounded transition-colors", focusPath.length === 0 ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground")}>簇</button>
               {breadcrumb.map((item, i) => (
                 <div key={i} className="flex items-center gap-0.5">
                   <ChevronRight className="w-3 h-3 text-muted-foreground" />

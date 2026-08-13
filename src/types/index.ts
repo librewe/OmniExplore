@@ -6,28 +6,26 @@ export interface LLMConfig {
   temperature: number;
 }
 
-export interface CustomQA {
-  id: string;
-  type: "inquiry" | "reference";
-  term: string;
-  question: string;
-  answer: string;
-  parent_node_id: string;
+export interface Entry {
+  type: "qa" | "note";
+  userInput: string;
+  assistantOutput: string | null;
+  expanded: boolean;
+  status?: NodeStatus;
+  errorMessage?: string;
+  children: Session[];
   created_at: number;
 }
 
-export interface ConceptNode {
+export interface Session {
   id: string;
-  term: string;
-  micro_intuition: string | null;
-  micro_definition: string | null;
-  micro_application: string | null;
-  micro_motivation: string | null;
-  macro_territory: string | null;
-  macro_logic: string | null;
-  macro_touchpoint: string | null;
-  macro_evolution: string | null;
-  custom_qa: CustomQA[];
+  title: string;
+  entries: Entry[];
+  /** 所属工作组 ID。仅根 Session 有意义；子 Session 通过嵌套继承归属。 */
+  groupId?: string;
+  /** 反向引用：子 Session → 父 Session（fork 自父 Session 的某个 entry）。Entry 无独立 ID，fork 点 entry 通过 findIndex 在父 Session.entries 中定位。 */
+  parentSessionId?: string;
+  forkBoundary?: string;
   created_at: number;
   updated_at: number;
 }
@@ -35,7 +33,6 @@ export interface ConceptNode {
 export interface WorkGroup {
   id: string;
   name: string;
-  root_term_ids: string[];
   guide_map: GuideMapNode | null;
   created_at: number;
   updated_at: number;
@@ -47,48 +44,11 @@ export interface GuideMapNode {
   _group?: boolean;
 }
 
-export interface PathNode {
-  term: string;
-  node_id: string;
-  timestamp: number;
-}
-
-export interface CognitionPath {
-  nodes: PathNode[];
-  current_index: number;
-}
-
-export type ViewMode = "micro" | "macro";
-
-export type InputMode = "focus" | "inquiry";
-
 export type NodeStatus = "idle" | "loading" | "streaming" | "done" | "error";
-
-export interface PresetChildDef {
-  key: string;
-  icon: string;
-  label: string;
-  defaultExpanded: boolean;
-  autoGenerate: boolean;
-}
 
 export interface ParsedSegment {
   type: "text" | "term";
   content: string;
-}
-
-export interface TreeNodeData {
-  id: string;
-  type: "root" | "preset" | "inquiry" | "reference";
-  title: string;
-  term: string;
-  content: string | null;
-  status: NodeStatus;
-  errorMessage?: string;
-  presetKey?: string;
-  expanded: boolean;
-  children: TreeNodeData[];
-  parentId: string | null;
 }
 
 export interface PlusMenuItem {

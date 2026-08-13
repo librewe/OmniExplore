@@ -46,7 +46,7 @@ export function HoverPreview({ term, preview, anchorRect, onClose, onMouseEnter,
       style={style}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      className="animate-fade-in rounded-lg border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-lg"
+      className="pointer-events-none animate-fade-in rounded-lg border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-lg"
     >
       {preview ? (
         <div className="text-muted-foreground text-xs line-clamp-1">{display}</div>

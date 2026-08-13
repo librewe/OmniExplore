@@ -2,68 +2,69 @@
 
 import { useEffect, useReducer, useState, useCallback, useRef } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { TermListContext } from "@/lib/TermListContext";
-import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { NodeListContext } from "@/lib/NodeListContext";
 import { WorkGroupSwitcher } from "@/components/WorkGroupSwitcher";
-import { RecursiveTree } from "@/components/RecursiveTree";
 import { InputBar } from "@/components/InputBar";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { PreviewPanel } from "@/components/PreviewPanel";
 import { GuideMapCanvas, buildBreadcrumbItems } from "@/components/GuideMapCanvas";
-import { TermLibrary } from "@/components/TermLibrary";
+import { NodeLibrary } from "@/components/NodeLibrary";
 import { FilesList } from "@/components/FilesList";
 import { PDFViewer } from "@/components/PDFViewer";
 import { Onboarding } from "@/components/Onboarding";
-import { treeReducer, getInitialTreeState, buildRootNode } from "@/store/treeStore";
-import { footprintReducer, initialState as initialFootprint } from "@/store/footprintStore";
+import { ContextMenu } from "@/components/ContextMenu";
+import { HoverPreview } from "@/components/HoverPreview";
 import { initializeConfig, useConfigStore } from "@/store/configStore";
-import { getConceptNode, getConceptNodeByTerm, putConceptNode, deleteConceptNode, getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG, getAllFiles, putFile, deleteFile } from "@/services/cache";
-import { streamLLM, LLMError } from "@/services/llm";
-import { getPresetPrompt, inquiryPrompt } from "@/services/prompts";
-import { extractTitle, cn } from "@/lib/utils";
-import { Layers, ChevronRight, Search, Plus } from "lucide-react";
-import { DEFAULT_INQUIRY_TEMPLATES, DEFAULT_SELECTION_TEMPLATES, getPresetPrefix } from "@/lib/constants";
+import { getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG, getAllFiles, putFile, deleteFile, migrateData } from "@/services/cache";
+import { streamLLMChat, LLMError } from "@/services/llm";
+import { cn } from "@/lib/utils";
+import { Layers, ChevronRight, Search, Plus, Pencil, Trash2, Copy, GitBranch } from "lucide-react";
+import { DEFAULT_PLUS_TEMPLATES, DEFAULT_SELECTION_TEMPLATES } from "@/lib/constants";
+import { intuitionPrompt, definitionPrompt, applicationPrompt, motivationPrompt, loadCustomPresetPrompts } from "@/services/prompts";
 import type {
-  TreeNodeData,
-  ConceptNode,
   WorkGroup,
   GuideMapNode,
   PlusMenuItem,
-  CustomQA,
   StoredFile,
 } from "@/types";
-import SparkMD5 from "spark-md5";
+import { NodeView } from "@/components/NodeView";
+import { nodeReducer, getInitialNodeState, createSession, createEntry } from "@/store/nodeStore";
+import { putSession, deleteSession, getAllSessions } from "@/services/cache";
+import type { Session, Entry } from "@/types";
 
 function buildDefaultPlusMenu(): PlusMenuItem[] {
-  return DEFAULT_INQUIRY_TEMPLATES.map((t, i) => ({
+  return DEFAULT_PLUS_TEMPLATES.map((t, i) => ({
     id: `default_${i}`,
-    label: t,
-    prompt: t,
+    label: t.label,
+    prompt: t.prompt,
   }));
 }
 
-function buildCustomQA(template: {
-  id: string;
-  type: "inquiry" | "reference";
-  term: string;
-  question: string;
-  answer: string;
-  parent_node_id: string;
-}): CustomQA {
-  return {
-    ...template,
-    created_at: Date.now(),
-  };
-}
+const ROOT_PRESET_LABELS: Record<string, string> = {
+  micro_intuition: "动态直觉",
+  micro_definition: "看定义",
+  micro_application: "看应用",
+  micro_motivation: "看动机",
+};
+
+const ROOT_PRESET_DEFAULTS: Record<string, { system: string; user: string }> = {
+  micro_intuition: intuitionPrompt("${term}"),
+  micro_definition: definitionPrompt("${term}"),
+  micro_application: applicationPrompt("${term}"),
+  micro_motivation: motivationPrompt("${term}"),
+};
+
+const rootPlusMenuItems: PlusMenuItem[] = Object.keys(ROOT_PRESET_LABELS).map((k) => ({
+  id: `root_${k}`,
+  label: ROOT_PRESET_LABELS[k],
+  prompt: ROOT_PRESET_DEFAULTS[k].user,
+}));
 
 export default function Home() {
   type NavEntry =
     | { type: "tree"; term: string }
     | { type: "guideMap"; pathStr: string; focusPath: number[] };
 
-  function navEntryLabel(e: NavEntry): string {
-    return e.type === "tree" ? e.term : `[导图] ${e.pathStr}`;
-  }
   function navEntryEq(a: NavEntry, b: NavEntry): boolean {
     if (!a || !b) return false;
     if (a.type !== b.type) return false;
@@ -74,43 +75,51 @@ export default function Home() {
 
   const isInitialized = useRef(false);
 
-  const [treeState, dispatchTree] = useReducer(treeReducer, getInitialTreeState());
-  const [footprint, dispatchFootprint] = useReducer(footprintReducer, initialFootprint);
+  const [nodeState, dispatchNode] = useReducer(nodeReducer, getInitialNodeState());
+  const [nodeList, setNodeList] = useState<Session[]>([]);
+  const nodeRef = useRef(nodeState.session);
+  nodeRef.current = nodeState.session;
+  const targetNodeIdRef = useRef<string | null>(null);
+
+  const findSessionInTree = useCallback((id: string): Session | undefined => {
+    const root = nodeRef.current;
+    if (!root) return undefined;
+    if (root.id === id) return root;
+    function search(session: Session): Session | undefined {
+      for (const e of session.entries) {
+        for (const c of e.children) {
+          if (c.id === id) return c;
+          const found = search(c);
+          if (found) return found;
+        }
+      }
+      return undefined;
+    }
+    return search(root);
+  }, []);
+  const [contextTarget, setContextTarget] = useState<{ type: "session"; id: string } | { type: "entry"; entry: Entry } | null>(null);
+  const [contextPos, setContextPos] = useState({ x: 0, y: 0 });
+  const closeContext = useCallback(() => { setContextTarget(null); contextNodeRef.current = null; }, []);
+  const contextNodeRef = useRef<Session | null>(null);
+  const renameNodeRef = useRef<Session | null>(null);
+  const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
+  const streamingAbortRef = useRef<AbortController | null>(null);
+  const presetSystemRef = useRef<string | null>(null);
 
   const config = useConfigStore((s) => s.config);
   const isConfigured = useConfigStore((s) => s.isConfigured);
 
   const [workGroups, setWorkGroups] = useState<WorkGroup[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
-  const [termList, setTermList] = useState<string[]>([]);
-  const [allTerms, setAllTerms] = useState<string[]>([]);
-
-  useEffect(() => {
-    const all = new Set<string>();
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key?.startsWith("term_list_")) {
-        try {
-          const terms: string[] = JSON.parse(localStorage.getItem(key) || "[]");
-          terms.forEach((t) => all.add(t));
-        } catch {}
-      }
-    }
-    setAllTerms(Array.from(all));
-  }, [termList]);
   const [plusMenuItems, setPlusMenuItems] = useState<PlusMenuItem[]>([]);
   const [selectionMenuItems, setSelectionMenuItems] = useState<PlusMenuItem[]>([]);
   const [recentInputs, setRecentInputs] = useState<string[]>([]);
 
   const [showGuideMap, setShowGuideMap] = useState(false);
   const [fillValue, setFillValue] = useState<string>("");
-  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-  const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
+  const [editingEntry, setEditingEntry] = useState<Entry | null>(null);
   const [navHistory, setNavHistory] = useState<NavEntry[]>([]);
   const [navIndex, setNavIndex] = useState(-1);
-  const [backOpen, setBackOpen] = useState(false);
-  const [fwdOpen, setFwdOpen] = useState(false);
-  const skipHistoryRef = useRef(false);
   const navStoreRef = useRef<Map<string, { history: NavEntry[]; index: number }>>(new Map());
   const navIndexRef = useRef(-1);
   useEffect(() => { navIndexRef.current = navIndex; }, [navIndex]);
@@ -126,13 +135,13 @@ export default function Home() {
   const [hoverTermPreviewAnchor, setHoverTermPreviewAnchor] = useState<DOMRect | null>(null);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [leftTab, setLeftTab] = useState<"terms" | "files">("terms");
+  const [leftTab, setLeftTab] = useState<"nodes" | "files">("nodes");
   const [storedFiles, setStoredFiles] = useState<StoredFile[]>([]);
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [activePdf, setActivePdf] = useState<StoredFile | null>(null);
-  const [pdfBoundTerm, setPdfBoundTerm] = useState<string | null>(null);
-  const pdfBoundRef = useRef<string | null>(null);
-  useEffect(() => { pdfBoundRef.current = pdfBoundTerm; }, [pdfBoundTerm]);
+  const [pdfBoundNode, setPdfBoundNode] = useState<string | null>(null);
+  const pdfBoundNodeRef = useRef<string | null>(null);
+  useEffect(() => { pdfBoundNodeRef.current = pdfBoundNode; }, [pdfBoundNode]);
   const pdfBindingsRef = useRef<Map<string, string>>(new Map());
 
   useEffect(() => {
@@ -158,47 +167,27 @@ export default function Home() {
       }
       const termName = activePdf.name.replace(/\.[^.]+$/, "");
       const boundName = pdfBindingsRef.current.get(activePdf.name);
-      if (boundName && termList.some((t) => t.toLowerCase() === boundName.toLowerCase())) {
-        setPdfBoundTerm(boundName);
-      } else if (termList.some((t) => t.toLowerCase() === termName.toLowerCase())) {
-        setPdfBoundTerm(termName);
+      if (boundName && nodeList.some((s) => s.title.toLowerCase() === boundName.toLowerCase())) {
+        setPdfBoundNode(boundName);
+      } else if (nodeList.some((s) => s.title.toLowerCase() === termName.toLowerCase())) {
+        setPdfBoundNode(termName);
         pdfBindingsRef.current.set(activePdf.name, termName);
         saveBindings();
       } else {
-        setPdfBoundTerm(null);
+        setPdfBoundNode(null);
       }
     } else {
       hadPdfRef.current = false;
       setRightWidth(prevRightRef.current);
-      setPdfBoundTerm(null);
+      setPdfBoundNode(null);
     }
-  }, [activePdf, termList]);
+  }, [activePdf, nodeList]);
 
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), 2000);
     return () => clearTimeout(t);
   }, [toast]);
-
-  const streamingMapRef = useRef<Map<string, AbortController>>(new Map());
-  const expandedNodesRef = useRef<Map<string, Set<string>>>(new Map());
-
-  const saveExpandedState = useCallback(() => {
-    if (!treeState.rootNode) return;
-    const set = new Set<string>();
-    function collect(n: TreeNodeData) {
-      if (n.expanded) set.add(n.id);
-      n.children.forEach(collect);
-    }
-    collect(treeState.rootNode);
-    expandedNodesRef.current.set(treeState.rootTerm, set);
-  }, [treeState.rootNode, treeState.rootTerm]);
-
-  const restoreExpandedState = useCallback((term: string) => {
-    const set = expandedNodesRef.current.get(term);
-    if (!set) return;
-    set.forEach((id) => dispatchTree({ type: "EXPAND_NODE", nodeId: id }));
-  }, []);
 
   const activeGroup = workGroups.find((g) => g.id === activeGroupId);
 
@@ -208,12 +197,11 @@ export default function Home() {
 
     initializeConfig();
 
-    getAllWorkGroups().then((groups) => {
+    migrateData().then(() => getAllWorkGroups()).then((groups) => {
       if (groups.length === 0) {
         const defaultGroup: WorkGroup = {
           id: crypto.randomUUID(),
           name: "默认",
-          root_term_ids: [],
           guide_map: null,
           created_at: Date.now(),
           updated_at: Date.now(),
@@ -221,25 +209,15 @@ export default function Home() {
         putWorkGroup(defaultGroup).then(() => {
           setWorkGroups([defaultGroup]);
           setActiveGroupId(defaultGroup.id);
-          const t = localStorage.getItem(`term_list_${defaultGroup.id}`);
-          if (t) { try { setTermList(JSON.parse(t)); } catch {} }
         });
       } else {
         setWorkGroups(groups);
-        setActiveGroupId(groups[0].id);
-        const t = localStorage.getItem(`term_list_${groups[0].id}`);
-        if (t) { try { setTermList(JSON.parse(t)); } catch {} }
+        const saved = localStorage.getItem("active_group_id");
+        setActiveGroupId(saved && groups.some((g) => g.id === saved) ? saved : groups[0].id);
       }
     });
 
     getAllFiles().then(setStoredFiles);
-
-    const savedTerms = localStorage.getItem(`term_list_${activeGroupId || "default"}`);
-    if (savedTerms) {
-      try { setTermList(JSON.parse(savedTerms)); } catch {}
-    } else {
-      setTermList([]);
-    }
 
     const savedMenu = localStorage.getItem("plus_menu_items");
     if (savedMenu) {
@@ -267,6 +245,22 @@ export default function Home() {
     }
   }, [workGroups, activeGroupId]);
 
+  const nodeListLoadSeqRef = useRef(0);
+  const loadNodeList = useCallback(async (groupId: string) => {
+    const seq = ++nodeListLoadSeqRef.current;
+    const sessions = await getAllSessions(groupId);
+    if (seq !== nodeListLoadSeqRef.current) return;
+    const normalized = sessions.map(s => ({
+      ...s,
+      entries: s.entries.map(e => ({ ...e, children: e.children || [] })),
+    }));
+    setNodeList(normalized);
+  }, []);
+
+  useEffect(() => {
+    if (activeGroupId) loadNodeList(activeGroupId);
+  }, [activeGroupId, loadNodeList]);
+
   const savePlusMenu = useCallback((items: PlusMenuItem[]) => {
     setPlusMenuItems(items);
     localStorage.setItem("plus_menu_items", JSON.stringify(items));
@@ -277,43 +271,18 @@ export default function Home() {
     localStorage.setItem("selection_menu_items", JSON.stringify(items));
   }, []);
 
-  const termListKey = `term_list_${activeGroupId || "default"}`;
-
-  const saveTermList = useCallback((terms: string[]) => {
-    setTermList(terms);
-    localStorage.setItem(termListKey, JSON.stringify(terms));
-    if (activeGroupId) {
-      const group = workGroups.find((g) => g.id === activeGroupId);
-      if (group?.guide_map) {
-        const filterTerms = (n: GuideMapNode): GuideMapNode | null => {
-          if (n.term && !n._group && !terms.some((t) => t.toLowerCase() === n.term.toLowerCase())) return null;
-          const filtered = n.children.map(filterTerms).filter((c): c is GuideMapNode => c !== null);
-          return { ...n, children: filtered };
-        };
-        const result = filterTerms(group.guide_map);
-        if (result) {
-          group.guide_map = result;
-          group.updated_at = Date.now();
-          putWorkGroup(group).then(() => {
-            setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
-          });
-        }
-      }
+  const handlePlusSelect = useCallback((item: PlusMenuItem, sessionTitle: string) => {
+    if (item.id.startsWith("root_")) {
+      const key = item.id.slice(5);
+      const overrides = loadCustomPresetPrompts();
+      const preset = overrides[key] || ROOT_PRESET_DEFAULTS[key];
+      presetSystemRef.current = preset.system;
+      setFillValue(preset.user.replace(/\$\{term\}/g, sessionTitle));
+    } else {
+      presetSystemRef.current = null;
+      setFillValue(item.prompt.replace(/\$\{term\}/g, sessionTitle));
     }
-  }, [termListKey, activeGroupId, workGroups]);
-
-  const addToTermList = useCallback(
-    (term: string) => {
-      const lower = term.toLowerCase();
-      setTermList((prev) => {
-        if (prev.some((t) => t.toLowerCase() === lower)) return prev;
-        const next = [...prev, term];
-        localStorage.setItem(termListKey, JSON.stringify(next));
-        return next;
-      });
-    },
-    [termListKey]
-  );
+  }, []);
 
   const addRecentInput = useCallback((text: string) => {
     setRecentInputs((prev) => {
@@ -323,414 +292,324 @@ export default function Home() {
     });
   }, []);
 
-  const findNode = useCallback(
-    (nodeId: string): TreeNodeData | null => {
-      if (!treeState.rootNode) return null;
-      function search(n: TreeNodeData): TreeNodeData | null {
-        if (n.id === nodeId) return n;
-        for (const child of n.children) {
-          const found = search(child);
-          if (found) return found;
-        }
-        return null;
-      }
-      return search(treeState.rootNode);
-    },
-    [treeState.rootNode]
-  );
-
-  const handleSelect = useCallback((nodeId: string | null) => {
-    dispatchTree({ type: "SET_SELECTED", nodeId });
-    if (nodeId && treeState.rootNode) {
-      const n = findNode(nodeId);
-      if (n && n.type !== "root") {
-        dispatchTree({ type: "SET_ACTIVE_TAG", parentId: nodeId, title: n.title });
+  const ensureGuideMap = useCallback(async (title?: string) => {
+    if (!activeGroupId) return;
+    const group = workGroups.find((g) => g.id === activeGroupId);
+    if (!group) return;
+    if (!group.guide_map) {
+      group.guide_map = { term: "", children: [] };
+      group.updated_at = Date.now();
+      await putWorkGroup(group);
+      setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+    }
+    const currentTitle = title ?? nodeState.session?.title;
+    if (currentTitle && group.guide_map) {
+      const lower = currentTitle.toLowerCase();
+      const exists = group.guide_map.children.some((c) => c.term.toLowerCase() === lower);
+      if (!exists) {
+        group.guide_map = { ...group.guide_map, children: [...group.guide_map.children, { term: currentTitle, children: [] }] };
+        group.updated_at = Date.now();
+        putWorkGroup(group);
+        setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
       }
     }
-  }, [treeState.rootNode, findNode]);
+  }, [activeGroupId, workGroups, nodeState.session?.title]);
 
-  const handleStream = useCallback(
-    async (
-      nodeId: string,
-      config: import("@/types").LLMConfig,
-      systemPrompt: string,
-      userPrompt: string,
-      onDoneContent: (content: string) => void
-    ) => {
-      if (!config) return;
-      dispatchTree({ type: "SET_NODE_STATUS", nodeId, status: "loading" });
-      const abort = new AbortController();
-      streamingMapRef.current.set(nodeId, abort);
-
-      try {
-        let fullContent = "";
-        const generator = streamLLM(config, systemPrompt, userPrompt);
-        dispatchTree({ type: "SET_NODE_STATUS", nodeId, status: "streaming" });
-
-        for await (const chunk of generator) {
-          fullContent += chunk;
-          dispatchTree({ type: "APPEND_STREAMING", nodeId, chunk });
-        }
-
-        dispatchTree({ type: "SET_NODE_STATUS", nodeId, status: "done" });
-        onDoneContent(fullContent);
-      } catch (err) {
-        console.error("[OmniExplore] LLM stream error:", err);
-        const message =
-          err instanceof LLMError
-            ? err.message
-            : "网络连接失败";
-        dispatchTree({
-          type: "SET_NODE_STATUS",
-          nodeId,
-          status: "error",
-          errorMessage: message,
+  const handleFocusNode = useCallback(async (title: string, silent = false) => {
+    if (!title.trim()) return;
+    const existing = nodeList.find(s => s.title.toLowerCase() === title.trim().toLowerCase() && !s.parentSessionId);
+    if (existing) {
+      targetNodeIdRef.current = existing.id;
+      dispatchNode({ type: "SET_SESSION", session: existing });
+      dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: existing.id, title: existing.title });
+      setShowGuideMap(false);
+      setPreviewTitle(existing.title);
+      // Push nav history（导航触发 silent=true 时不推，避免污染历史）
+      if (!silent) {
+        const entry: NavEntry = { type: "tree", term: existing.title };
+        setNavHistory((prev) => {
+          const next = prev.slice(0, navIndex + 1);
+          if (next.length === 0 || !navEntryEq(next[next.length - 1], entry)) { next.push(entry); }
+          return next;
         });
+        setNavIndex((prev) => prev + 1);
+      }
+      // Set preview content
+      const plines: string[] = [];
+      for (const e of existing.entries) {
+        plines.push(`  💬 ${e.userInput.split('\n')[0].slice(0, 30)}`);
+      }
+      setPreviewContent(plines.join("\n"));
+      return;
+    }
+    const session = createSession(title.trim(), activeGroupId ?? undefined);
+    targetNodeIdRef.current = session.id;
+    dispatchNode({ type: "SET_SESSION", session });
+    dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: session.id, title: session.title });
+    await putSession(session);
+    setNodeList((prev) => [...prev.filter(s => s.id !== session.id), session]);
+    addRecentInput(title);
+    setShowGuideMap(false);
+    setPreviewTitle(session.title);
+    setPreviewContent(null);
+    // Push nav history（导航触发 silent=true 时不推）
+    if (!silent) {
+      const entry: NavEntry = { type: "tree", term: title };
+      setNavHistory((prev) => {
+        const next = prev.slice(0, navIndex + 1);
+        next.push(entry);
+        return next;
+      });
+      setNavIndex((prev) => prev + 1);
+    }
+    // Add to guide map
+    ensureGuideMap(title.trim());
+    // Set preview content from entries
+    const plines: string[] = [];
+    for (const e of session.entries) {
+      plines.push(`  💬 ${e.userInput.split('\n')[0].slice(0, 30)}`);
+    }
+    setPreviewContent(plines.join("\n"));
+  }, [nodeList, addRecentInput, navIndex, ensureGuideMap, activeGroupId]);
+
+  const handleStreamEntry = useCallback(
+    async (entry: Entry, config: import("@/types").LLMConfig, messages: { role: string; content: string }[]) => {
+      // Abort any previous stream
+      streamingAbortRef.current?.abort();
+      const abort = new AbortController();
+      streamingAbortRef.current = abort;
+      dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "loading" });
+      try {
+        let accumulated = "";
+        const generator = streamLLMChat(config, messages);
+        dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "streaming" });
+        for await (const chunk of generator) {
+          if (abort.signal.aborted) break;
+          accumulated += chunk;
+          dispatchNode({ type: "SET_STREAMING_CONTENT", entry, content: accumulated });
+        }
+        if (!abort.signal.aborted) {
+          dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "done" });
+        }
+        return accumulated;
+      } catch (err) {
+        if (abort.signal.aborted) return null;
+        console.error("[OmniExplore] LLM stream error:", err);
+        const message = err instanceof LLMError ? err.message : "网络连接失败";
+        dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "error", errorMessage: message });
+        return null;
       } finally {
-        streamingMapRef.current.delete(nodeId);
+        if (streamingAbortRef.current === abort) streamingAbortRef.current = null;
       }
     },
     []
   );
 
-  const persistNodeToDB = useCallback(
-    async (term: string, update: Partial<ConceptNode>) => {
-      const id = SparkMD5.hash(term.toLowerCase());
-      const existing = await getConceptNode(id);
-      const node: ConceptNode = existing ?? {
-        id,
-        term,
-        micro_intuition: null,
-        micro_definition: null,
-        micro_application: null,
-        micro_motivation: null,
-        macro_territory: null,
-        macro_logic: null,
-        macro_touchpoint: null,
-        macro_evolution: null,
-        custom_qa: [],
-        created_at: Date.now(),
-        updated_at: Date.now(),
-      };
-      Object.assign(node, update, { updated_at: Date.now() });
-      await putConceptNode(node);
-
-      if (activeGroupId) {
-        const group = await (await import("@/services/cache")).getWorkGroup(activeGroupId);
-        if (group && !group.root_term_ids.includes(id)) {
-          group.root_term_ids.push(id);
-          await putWorkGroup(group);
-          setWorkGroups((prev) =>
-            prev.map((g) => (g.id === activeGroupId ? group : g))
-          );
-        }
-      }
-    },
-    [activeGroupId]
-  );
-
-  const handleFocusTerm = useCallback(
-    async (term: string) => {
-      if (!term.trim()) return;
-      if (term === treeState.rootTerm) return;
-      saveExpandedState();
-      addRecentInput(term);
-      addToTermList(term);
-
-        if (!skipHistoryRef.current) {
-          const entry: NavEntry = { type: "tree", term };
-          navPushedRef.current = false;
-          setNavHistory((prev) => {
-            const next = prev.slice(0, navIndex + 1);
-            if (next.length === 0 || !navEntryEq(next[next.length - 1], entry)) { next.push(entry); navPushedRef.current = true; }
-            return next;
-          });
-          setNavIndex((prev) => navPushedRef.current ? prev + 1 : prev);
-        }
-      skipHistoryRef.current = false;
-
-      dispatchFootprint({ type: "APPEND", term, nodeId: SparkMD5.hash(term.toLowerCase()) });
-
-      const id = SparkMD5.hash(term.toLowerCase());
-      const cached = await getConceptNode(id);
-      const isNew = !cached;
-
-      const rootNode = buildRootNode(term, "micro");
-      dispatchTree({ type: "SET_ROOT", rootNode });
-      dispatchTree({ type: "SET_ACTIVE_TAG", parentId: "root", title: term });
-      setShowGuideMap(false);
-      ensureGuideMap();
-
-      if (isNew) {
-        const group = workGroups.find((g) => g.id === activeGroupId);
-        if (group?.guide_map) {
-          const lower = term.toLowerCase();
-          const exists = group.guide_map.children.some((c) => c.term.toLowerCase() === lower);
-          if (!exists) {
-            group.guide_map = { ...group.guide_map, children: [...group.guide_map.children, { term, children: [] }] };
-            group.updated_at = Date.now();
-            putWorkGroup(group);
-            setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
-          }
-        }
-      }
-
-      if (cached?.custom_qa) {
-        for (const qa of cached.custom_qa) {
-          const childNode: TreeNodeData = {
-            id: qa.id, type: qa.type,
-            title: qa.type === "reference" ? (qa.answer ? extractTitle(qa.answer) : "空节点") : qa.question,
-            term, content: qa.answer || "", status: "done", expanded: false, children: [], parentId: qa.parent_node_id,
-          };
-          dispatchTree({ type: "ADD_CHILD", parentId: qa.parent_node_id, child: childNode });
-        }
-      }
-
-      const presetFields: Array<{ nodeId: string; field: keyof ConceptNode; presetKey: string }> = [
-        { nodeId: "preset:micro_intuition", field: "micro_intuition", presetKey: "micro_intuition" },
-        { nodeId: "preset:micro_definition", field: "micro_definition", presetKey: "micro_definition" },
-        { nodeId: "preset:micro_application", field: "micro_application", presetKey: "micro_application" },
-        { nodeId: "preset:micro_motivation", field: "micro_motivation", presetKey: "micro_motivation" },
+  const handleCreateEntry = useCallback(async (userInput: string) => {
+    const s = findSessionInTree(targetNodeIdRef.current ?? "") || nodeRef.current;
+    if (!s || !userInput.trim()) return;
+    setFillValue("");
+    const systemPrompt = presetSystemRef.current ?? "你是一个有帮助的人工智能助手。";
+    presetSystemRef.current = null;
+    const entry = createEntry("qa", userInput.trim());
+    entry.status = "loading";
+    entry.expanded = true;
+    s.entries = [...s.entries, entry];
+    s.updated_at = Date.now();
+    dispatchNode({ type: "REPLACE_SESSION", session: { ...nodeRef.current! } });
+    await putSession(nodeRef.current!);
+    if (config && isConfigured) {
+      const messages: { role: string; content: string }[] = [
+        { role: "system", content: systemPrompt },
       ];
-      for (const pf of presetFields) {
-        if (cached?.[pf.field]) {
-          const prefix = getPresetPrefix(pf.presetKey);
-          const val = cached[pf.field] as string;
-          const display = val.startsWith(prefix.trim()) ? val : prefix + val;
-          dispatchTree({ type: "SET_NODE_CONTENT", nodeId: pf.nodeId, content: display });
-          dispatchTree({ type: "SET_NODE_TITLE", nodeId: pf.nodeId, title: extractTitle(display) });
-          dispatchTree({ type: "SET_NODE_STATUS", nodeId: pf.nodeId, status: "done" });
+      if (s.forkBoundary) {
+        // Walk up parentSessionId chain; for each ancestor, find which entry was forked from
+        type AncestorEntry = { session: Session; upToIndex: number };
+        const chain: AncestorEntry[] = [];
+        let cursor: Session | undefined = s;
+        while (cursor?.parentSessionId) {
+          const parent = findSessionInTree(cursor.parentSessionId);
+          if (!parent) break;
+          const forkedIdx = parent.entries.findIndex(e =>
+            e.children.some(c => c.id === cursor!.id)
+          );
+          chain.unshift({ session: parent, upToIndex: forkedIdx >= 0 ? forkedIdx : parent.entries.length - 1 });
+          cursor = parent;
         }
-      }
-
-      restoreExpandedState(term);
-
-      const id2 = SparkMD5.hash(term.toLowerCase());
-      const pcached = await getConceptNode(id2);
-      if (pcached) {
-        setPreviewTitle(term);
-        const plines: string[] = [];
-        const ppresets = [
-          { icon: "🌳", label: "动态直觉", field: "micro_intuition" },
-          { icon: "📐", label: "看定义", field: "micro_definition" },
-          { icon: "🔧", label: "看应用", field: "micro_application" },
-          { icon: "📜", label: "看动机", field: "micro_motivation" },
-        ];
-        for (const p of ppresets) {
-          const val = pcached[p.field as keyof ConceptNode] as string | null;
-          plines.push(`  ${p.icon} ${p.label}${val ? "" : " (未生成)"}`);
-          const sub = pcached.custom_qa.filter((qa) => qa.parent_node_id === `preset:${p.field}`);
-          for (const qa of sub) plines.push(`    ${qa.type === "inquiry" ? "💬" : "📖"} ${qa.question || extractTitle(qa.answer) || "空节点"}`);
-        }
-        const rootSub = pcached.custom_qa.filter((qa) => qa.parent_node_id === "root");
-        for (const qa of rootSub) plines.push(`  ${qa.type === "inquiry" ? "💬" : "📖"} ${qa.question || extractTitle(qa.answer) || "空节点"}`);
-        setPreviewContent(plines.join("\n"));
-      }
-
-      if (!config) return;
-
-      if (!cached?.micro_intuition) {
-        const prompt = getPresetPrompt("micro_intuition", term);
-        if (prompt) {
-          handleStream("preset:micro_intuition", config, prompt.system, prompt.user, (content) => {
-            const prefix = getPresetPrefix("micro_intuition");
-            const fullContent = prefix + content;
-            dispatchTree({ type: "SET_NODE_CONTENT", nodeId: "preset:micro_intuition", content: fullContent });
-            dispatchTree({ type: "SET_NODE_TITLE", nodeId: "preset:micro_intuition", title: extractTitle(fullContent) || "动态直觉" });
-            persistNodeToDB(term, { micro_intuition: fullContent });
-          });
-        }
-      }
-
-    },
-    [addRecentInput, addToTermList, config, handleStream, persistNodeToDB, saveExpandedState, restoreExpandedState]
-  );
-
-  const handleToggleExpand = useCallback(
-    async (nodeId: string) => {
-      const node = findNode(nodeId);
-      if (!node) return;
-
-      const isExpanding = !node.expanded;
-
-      if (!isExpanding) {
-        dispatchTree({ type: "TOGGLE_EXPAND", nodeId });
-        return;
-      }
-
-      dispatchTree({ type: "EXPAND_NODE", nodeId });
-
-      if (node.type === "preset" && node.content === null && node.presetKey && config) {
-        const term = node.term;
-        const id = SparkMD5.hash(term.toLowerCase());
-        const cached = await getConceptNode(id);
-
-        const fieldMap: Record<string, keyof ConceptNode> = {
-          micro_intuition: "micro_intuition",
-          micro_definition: "micro_definition",
-          micro_application: "micro_application",
-          micro_motivation: "micro_motivation",
-          macro_territory: "macro_territory",
-          macro_logic: "macro_logic",
-          macro_touchpoint: "macro_touchpoint",
-          macro_evolution: "macro_evolution",
-        };
-
-        const field = fieldMap[node.presetKey];
-        if (field && cached?.[field]) {
-          const prefix = getPresetPrefix(node.presetKey);
-          const val = cached[field] as string;
-          const content = val.startsWith(prefix.trim()) ? val : prefix + val;
-          dispatchTree({ type: "SET_NODE_CONTENT", nodeId, content });
-          dispatchTree({ type: "SET_NODE_STATUS", nodeId, status: "done" });
-          return;
-        }
-
-        const prompt = getPresetPrompt(node.presetKey, term);
-        if (prompt) {
-          handleStream(nodeId, config, prompt.system, prompt.user, (content) => {
-            const prefix = getPresetPrefix(node.presetKey || "");
-            const fullContent = prefix + content;
-            dispatchTree({ type: "SET_NODE_CONTENT", nodeId, content: fullContent });
-            dispatchTree({ type: "SET_NODE_TITLE", nodeId, title: extractTitle(fullContent) || node.title });
-            persistNodeToDB(term, { [field]: fullContent });
-          });
-        }
-      }
-    },
-    [findNode, config, handleStream, persistNodeToDB]
-  );
-
-  const handleCreateChild = useCallback(
-    async (text: string) => {
-      const parentId = treeState.activeTag.parentId || "root";
-      const childId = `qa_${Date.now()}`;
-      const childNode: TreeNodeData = {
-        id: childId,
-        type: "inquiry",
-        title: text,
-        term: treeState.rootTerm,
-        content: null,
-        status: "loading" as const,
-        expanded: true,
-        children: [],
-        parentId,
-      };
-      dispatchTree({ type: "ADD_CHILD", parentId, child: childNode });
-
-      if (config) {
-        const parentIdActual = treeState.activeTag.parentId;
-        const parentNode = parentIdActual && parentIdActual !== "root" ? findNode(parentIdActual) : treeState.rootNode;
-        const parentTerm = parentNode?.term || treeState.rootTerm;
-
-        const ancestors: string[] = [];
-        let ancestorId = parentNode?.parentId;
-        while (ancestorId) {
-          const an = findNode(ancestorId);
-          if (an) {
-            ancestors.unshift(an.term || an.title);
-            ancestorId = an.parentId;
-          } else {
-            break;
+        for (const { session: ancestor, upToIndex } of chain) {
+          if (ancestor.forkBoundary) {
+            messages.push({ role: "system", content: ancestor.forkBoundary });
+          }
+          for (let i = 0; i <= upToIndex; i++) {
+            const pe = ancestor.entries[i];
+            if (pe.type === "qa" && pe.userInput) {
+              messages.push({ role: "user", content: pe.userInput });
+              if (pe.assistantOutput) messages.push({ role: "assistant", content: pe.assistantOutput });
+            } else if (pe.type === "note" && pe.userInput) {
+              messages.push({ role: "user", content: `[笔记] ${pe.userInput}` });
+            }
           }
         }
-
-        const { system, user } = inquiryPrompt(parentTerm, treeState.rootTerm, text, ancestors);
-        handleStream(childId, config, system, user, (content) => {
-          const fullContent = text + "\n" + content;
-          dispatchTree({ type: "SET_NODE_CONTENT", nodeId: childId, content: fullContent });
-          dispatchTree({ type: "SET_NODE_TITLE", nodeId: childId, title: extractTitle(fullContent) || text });
-          const term = treeState.rootTerm;
-          const id = SparkMD5.hash(term.toLowerCase());
-          getConceptNode(id).then((existing) => {
-            const qa = buildCustomQA({
-              id: childId,
-              type: "inquiry",
-              term,
-              question: text,
-              answer: content,
-              parent_node_id: parentId,
-            });
-            const updated: ConceptNode = existing
-              ? { ...existing, custom_qa: [...existing.custom_qa, qa], updated_at: Date.now() }
-              : {
-                  id,
-                  term,
-                  micro_intuition: null,
-                  micro_definition: null,
-                  micro_application: null,
-                  micro_motivation: null,
-                  macro_territory: null,
-                  macro_logic: null,
-                  macro_touchpoint: null,
-                  macro_evolution: null,
-                  custom_qa: [qa],
-                  created_at: Date.now(),
-                  updated_at: Date.now(),
-                };
-            putConceptNode(updated);
-          });
-        });
+        messages.push({ role: "system", content: s.forkBoundary });
       }
-    },
-    [treeState, config, handleStream, findNode]
-  );
+      for (const pe of s.entries.slice(0, -1)) {
+        if (pe.type === "qa" && pe.userInput) {
+          messages.push({ role: "user", content: pe.userInput });
+          if (pe.assistantOutput) messages.push({ role: "assistant", content: pe.assistantOutput });
+        } else if (pe.type === "note" && pe.userInput) {
+          messages.push({ role: "user", content: `[笔记] ${pe.userInput}` });
+        }
+      }
+      messages.push({ role: "user", content: userInput.trim() });
+      console.log("[OmniExplore] messages:", messages.map(m => `${m.role}: ${m.content.slice(0, 60)}`));
+      await handleStreamEntry(entry, config, messages);
+      s.updated_at = Date.now();
+      await putSession(nodeRef.current!);
+      dispatchNode({ type: "REPLACE_SESSION", session: { ...nodeRef.current! } });
+    }
+  }, [config, isConfigured, handleStreamEntry, findSessionInTree]);
 
-  const handleTermDoubleClick = useCallback(
-      (term: string) => {
-        handleFocusTerm(term);
-      },
-      [handleFocusTerm]
-    );
+  const handleToggleEntryExpand = useCallback(async (session: Session, entry: Entry) => {
+    entry.expanded = !entry.expanded;
+    session.updated_at = Date.now();
+    await putSession(nodeRef.current!);
+    dispatchNode({ type: "REPLACE_SESSION", session: { ...nodeRef.current! } });
+  }, []);
 
-  const handleTermContextMenu = useCallback(
-    (e: React.MouseEvent, term: string) => {
-      const menu = document.createElement("div");
-      menu.className = "fixed z-50 min-w-[180px] rounded-md border bg-popover p-1 shadow-md";
-      menu.style.left = `${e.clientX}px`;
-      menu.style.top = `${e.clientY}px`;
+  const handleSelectEntry = useCallback((entry: Entry | null) => { dispatchNode({ type: "SET_SELECTED_ENTRY", entry }); }, []);
+  const handleSelectSession = useCallback((session: Session | null) => {
+    dispatchNode({ type: "SET_SELECTED_SESSION", session });
+    if (session) {
+      dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: session.id, title: session.title });
+      targetNodeIdRef.current = session.id;
+    }
+  }, []);
 
-      const focusBtn = document.createElement("button");
-      focusBtn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
-      focusBtn.innerHTML = "<span>🎯</span> <span>聚焦</span>";
-      focusBtn.onclick = () => { menu.remove(); handleFocusTerm(term); };
-      menu.appendChild(focusBtn);
+  const handleCreateEmptyEntry = useCallback(async () => {
+    const s = findSessionInTree(targetNodeIdRef.current ?? "") || nodeRef.current;
+    if (!s) return;
+    const entry = createEntry("note", "");
+    s.entries = [...s.entries, entry];
+    s.updated_at = Date.now();
+    dispatchNode({ type: "REPLACE_SESSION", session: { ...nodeRef.current! } });
+    await putSession(nodeRef.current!);
+  }, [findSessionInTree]);
 
-      const inquireBtn = document.createElement("button");
-      inquireBtn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
-      inquireBtn.innerHTML = "<span>💬</span> <span>追问</span>";
-      inquireBtn.onclick = () => {
-        menu.remove();
-        setFillValue(`${term}？`);
-      };
-      menu.appendChild(inquireBtn);
+  const handleDeleteEntry = useCallback(async (session: Session, entry: Entry) => {
+    session.entries = session.entries.filter(e => e !== entry);
+    session.updated_at = Date.now();
+    await putSession(nodeRef.current!);
+    dispatchNode({ type: "REPLACE_SESSION", session: { ...nodeRef.current! } });
+  }, []);
 
-      selectionMenuItems.forEach((item) => {
-        const btn = document.createElement("button");
-        btn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
-        btn.innerHTML = `<span>💬</span> <span>${item.label}</span>`;
-        btn.onclick = () => {
-          menu.remove();
-          const rootTerm = treeState.rootTerm;
-          const label = item.prompt
-            .replace(/\$\{selected\}/g, term)
-            .replace(/\$\{root\}/g, rootTerm);
-          setFillValue(label);
-        };
-        menu.appendChild(btn);
-      });
+  const handleForkEntry = useCallback(async (session: Session, entry: Entry) => {
+    const forkNum = entry.children.length + 1;
+    const child = createSession(`${session.title} (分支#${forkNum})`, session.groupId);
+    child.parentSessionId = session.id;
+    child.forkBoundary = "--- fork boundary ---";
+    entry.children = [...entry.children, child];
+    entry.expanded = true;
+    session.updated_at = Date.now();
+    dispatchNode({ type: "REPLACE_SESSION", session: { ...nodeRef.current! } });
+    await putSession(nodeRef.current!);
+  }, []);
 
-      document.body.appendChild(menu);
-      const close = (ev: MouseEvent) => {
-        if (!menu.contains(ev.target as Node)) { menu.remove(); document.removeEventListener("click", close); }
-      };
-      setTimeout(() => document.addEventListener("click", close), 0);
-    },
-    [handleFocusTerm, selectionMenuItems, treeState.rootTerm]
-  );
+  const handleNodeContextMenu = useCallback((e: React.MouseEvent, session: Session) => { e.preventDefault(); contextNodeRef.current = session; setContextTarget({ type: "session", id: session.id }); setContextPos({ x: e.clientX, y: e.clientY }); }, []);
+  const handleEntryContextMenu = useCallback((e: React.MouseEvent, session: Session, entry: Entry) => { e.preventDefault(); contextNodeRef.current = session; setContextTarget({ type: "entry", entry }); setContextPos({ x: e.clientX, y: e.clientY }); }, []);
+
+  const handleRenameNode = useCallback((session: Session) => { renameNodeRef.current = session; setRenamingNodeId(session.id); }, []);
+
+  const handleDeleteNodeFromMenu = useCallback(async (sessionId: string) => {
+    const s = contextNodeRef.current;
+    if (!s) return;
+    await deleteSession(s.id);
+    if (s.parentSessionId) {
+      const root = nodeRef.current;
+      if (root && removeChildNode(root, s.id)) {
+        root.updated_at = Date.now();
+        await putSession(root);
+        dispatchNode({ type: "REPLACE_SESSION", session: { ...root } });
+      }
+    } else {
+      setNodeList(prev => prev.filter(x => x.id !== s.id));
+    }
+    if (nodeState.session?.id === s.id) {
+      dispatchNode({ type: "CLEAR_SESSION" });
+      setPreviewTitle(""); setPreviewContent(null);
+    }
+    closeContext();
+  }, [nodeState.session, closeContext]);
+
+  function removeChildNode(session: Session, childId: string): boolean {
+    for (const e of session.entries) {
+      const idx = e.children.findIndex(c => c.id === childId);
+      if (idx >= 0) { e.children.splice(idx, 1); return true; }
+      for (const c of e.children) { if (removeChildNode(c, childId)) return true; }
+    }
+    return false;
+  }
+
+  const handleNodeRenameSubmit = useCallback(async (sessionId: string, title: string) => {
+    if (!title.trim()) { setRenamingNodeId(null); return; }
+    const s = renameNodeRef.current || nodeRef.current;
+    if (!s) { setRenamingNodeId(null); return; }
+    s.title = title.trim();
+    s.updated_at = Date.now();
+    await putSession(nodeRef.current!);
+    if (s.parentSessionId) {
+      dispatchNode({ type: "REPLACE_SESSION", session: { ...nodeRef.current! } });
+    } else {
+      setNodeList(prev => prev.map(x => x.id === s.id ? { ...x, title: title.trim() } : x));
+      if (nodeState.session?.id === s.id) dispatchNode({ type: "RENAME_SESSION", title: title.trim() });
+    }
+    setRenamingNodeId(null);
+  }, [nodeState.session]);
+
+  const findSessionForEntry = useCallback((entry: Entry): Session | undefined => {
+    const root = nodeRef.current;
+    if (!root) return undefined;
+    function search(s: Session): Session | undefined {
+      if (s.entries.includes(entry)) return s;
+      for (const e of s.entries) {
+        for (const c of e.children) {
+          const found = search(c);
+          if (found) return found;
+        }
+      }
+      return undefined;
+    }
+    return search(root);
+  }, []);
+
+  // 划词追问：先从原 entry 分支，再追加到分支 session 并回答
+  const handleSelectionAsk = useCallback(async (question: string, entry: Entry | null) => {
+    if (!entry) {
+      const s = nodeRef.current;
+      if (s) {
+        targetNodeIdRef.current = s.id;
+        dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: s.id, title: s.title });
+      }
+      setFillValue(question);
+      return;
+    }
+    const host = findSessionForEntry(entry);
+    if (!host) return;
+    const forkNum = entry.children.length + 1;
+    const child = createSession(`${host.title} (分支#${forkNum})`, host.groupId);
+    child.parentSessionId = host.id;
+    child.forkBoundary = "--- fork boundary ---";
+    entry.children = [...entry.children, child];
+    entry.expanded = true;
+    host.updated_at = Date.now();
+    await putSession(nodeRef.current!);
+    dispatchNode({ type: "REPLACE_SESSION", session: { ...nodeRef.current! } });
+    targetNodeIdRef.current = child.id;
+    dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: child.id, title: child.title });
+    setFillValue(question);
+  }, [findSessionForEntry]);
 
   const handleSelectionContextMenu = useCallback(
-    (e: React.MouseEvent, selectedText: string, nodeId: string) => {
+    (e: React.MouseEvent, selectedText: string, entry: Entry | null) => {
       const menu = document.createElement("div");
       menu.className = "fixed z-50 min-w-[180px] rounded-md border bg-popover p-1 shadow-md";
       menu.style.left = `${e.clientX}px`;
@@ -739,18 +618,8 @@ export default function Home() {
       const focusBtn = document.createElement("button");
       focusBtn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
       focusBtn.innerHTML = "<span>🎯</span> <span>聚焦</span>";
-      focusBtn.onclick = () => { menu.remove(); handleFocusTerm(selectedText); };
+      focusBtn.onclick = () => { menu.remove(); handleFocusNode(selectedText); };
       menu.appendChild(focusBtn);
-
-      const inquireBtn = document.createElement("button");
-      inquireBtn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
-      inquireBtn.innerHTML = "<span>💬</span> <span>追问</span>";
-      inquireBtn.onclick = () => {
-        menu.remove();
-        dispatchTree({ type: "SET_ACTIVE_TAG", parentId: nodeId, title: findNode(nodeId)?.title || "" });
-        setFillValue(`${selectedText}？`);
-      };
-      menu.appendChild(inquireBtn);
 
       selectionMenuItems.forEach((item) => {
         const btn = document.createElement("button");
@@ -758,13 +627,11 @@ export default function Home() {
         btn.innerHTML = `<span>💬</span> <span>${item.label}</span>`;
         btn.onclick = () => {
           menu.remove();
-          const node = findNode(nodeId);
-          const rootTerm = treeState.rootTerm;
+          const rootTerm = nodeState.session?.title ?? "";
           const label = item.prompt
             .replace(/\$\{selected\}/g, selectedText)
             .replace(/\$\{root\}/g, rootTerm);
-          dispatchTree({ type: "SET_ACTIVE_TAG", parentId: nodeId, title: node?.title || "" });
-          setFillValue(label);
+          handleSelectionAsk(label, entry);
         };
         menu.appendChild(btn);
       });
@@ -775,34 +642,18 @@ export default function Home() {
       };
       setTimeout(() => document.addEventListener("click", close), 0);
     },
-    [handleFocusTerm, selectionMenuItems, findNode, treeState.rootTerm]
+    [handleFocusNode, selectionMenuItems, nodeState.session?.title, handleSelectionAsk]
   );
 
   const handleTermHover = useCallback(
-    async (e: React.MouseEvent, term: string) => {
+    (e: React.MouseEvent, term: string) => {
       const rect = (e.target as HTMLElement).getBoundingClientRect();
       setHoverTermPreviewAnchor(rect);
       setHoverTermPreviewTerm(term);
-      try {
-        const id = SparkMD5.hash(term.toLowerCase());
-        const node = (await getConceptNode(id)) ?? (await getConceptNodeByTerm(term));
-        if (node) {
-          const raw =
-            node.micro_intuition ||
-            node.micro_definition ||
-            node.micro_application ||
-            node.micro_motivation ||
-            node.custom_qa?.find((q) => q.answer)?.answer;
-          const preview = raw ? raw.replace(/^[^\n]*\n/, "").slice(0, 120) : null;
-          setHoverTermPreview(preview);
-        } else {
-          setHoverTermPreview(null);
-        }
-      } catch {
-        setHoverTermPreview(null);
-      }
+      const node = nodeList.find(s => s.title.toLowerCase() === term.toLowerCase());
+      setHoverTermPreview(node ? node.title : null);
     },
-    []
+    [nodeList]
   );
 
   const handleTermLeave = useCallback(() => {
@@ -810,358 +661,31 @@ export default function Home() {
     setHoverTermPreviewAnchor(null);
   }, []);
 
-  const handlePlusSelect = useCallback(
-    (parentId: string, promptTemplate: string) => {
-      const parentNode = findNode(parentId);
-      if (!parentNode) return;
-
-      const label = promptTemplate.replace(/\$\{term\}/g, parentNode.term);
-      dispatchTree({ type: "SET_ACTIVE_TAG", parentId, title: parentNode.title });
-      setFillValue(label);
-    },
-    [findNode]
-  );
-
-  const handleCreateEmptyChild = useCallback(
-    (parentId: string) => {
-      const childId = `ref_${Date.now()}`;
-      const childNode: TreeNodeData = {
-        id: childId,
-        type: "reference",
-        title: "空节点",
-        term: treeState.rootTerm,
-        content: "",
-        status: "done",
-        expanded: true,
-        children: [],
-        parentId,
-      };
-      dispatchTree({ type: "ADD_CHILD", parentId, child: childNode });
-
-      const term = treeState.rootTerm;
-      const id = SparkMD5.hash(term.toLowerCase());
-      getConceptNode(id).then((existing) => {
-        const qa: CustomQA = {
-          id: childId,
-          type: "reference",
-          term,
-          question: "",
-          answer: "",
-          parent_node_id: parentId,
-          created_at: Date.now(),
-        };
-        const updated: ConceptNode = existing
-          ? { ...existing, custom_qa: [...existing.custom_qa, qa], updated_at: Date.now() }
-          : {
-              id, term,
-              micro_intuition: null, micro_definition: null, micro_application: null, micro_motivation: null,
-              macro_territory: null, macro_logic: null, macro_touchpoint: null, macro_evolution: null,
-              custom_qa: [qa],
-              created_at: Date.now(), updated_at: Date.now(),
-            };
-        putConceptNode(updated);
-      });
-    },
-    [treeState.rootTerm]
-  );
-
-  const handleCreateReference = useCallback(
-    (parentId: string) => {
-      const childId = `ref_${Date.now()}`;
-      const childNode: TreeNodeData = {
-        id: childId,
-        type: "reference",
-        title: "参考",
-        term: treeState.rootTerm,
-        content: "",
-        status: "done",
-        expanded: true,
-        children: [],
-        parentId,
-      };
-      dispatchTree({ type: "ADD_CHILD", parentId, child: childNode });
-    },
-    [treeState.rootTerm]
-  );
-
-  const handleRefresh = useCallback(
-    async (nodeId: string) => {
-      const node = findNode(nodeId);
-      if (!node || !config) return;
-
-      if (node.type === "preset" && node.presetKey) {
-        const prompt = getPresetPrompt(node.presetKey, node.term);
-        if (prompt) {
-          dispatchTree({ type: "SET_NODE_CONTENT", nodeId, content: "" });
-          dispatchTree({ type: "SET_NODE_STATUS", nodeId, status: "loading" });
-          handleStream(nodeId, config, prompt.system, prompt.user, (content) => {
-            const field = node.presetKey as keyof ConceptNode;
-            persistNodeToDB(node.term, { [field]: content });
-          });
-        }
-      } else if (node.type === "inquiry") {
-        const parentNode = findNode(node.parentId || "root");
-        const parentTerm = parentNode?.term || node.term;
-        const { system, user } = inquiryPrompt(parentTerm, node.term, node.title);
-        dispatchTree({ type: "SET_NODE_CONTENT", nodeId, content: "" });
-        dispatchTree({ type: "SET_NODE_STATUS", nodeId, status: "loading" });
-        handleStream(nodeId, config, system, user, (content) => {});
-      }
-    },
-    [findNode, config, handleStream, persistNodeToDB]
-  );
-
-  const handleRename = useCallback(
-    (nodeId: string) => {
-      setRenamingNodeId(nodeId);
-    },
-    []
-  );
-
-  const handleRenameSubmit = useCallback(
-    (nodeId: string, newTitle: string) => {
-      if (!newTitle.trim()) { setRenamingNodeId(null); return; }
-      const node = findNode(nodeId);
-      if (node && node.type === "root") {
-        const newTerm = newTitle.trim();
-        if (node.term.toLowerCase() !== newTerm.toLowerCase() && termList.some((t) => t.toLowerCase() === newTerm.toLowerCase())) {
-          setToast(`"${newTerm}" 已存在`);
-          setRenamingNodeId(null);
-          return;
-        }
-      }
-      dispatchTree({ type: "SET_NODE_TITLE", nodeId, title: newTitle.trim() });
-      if (node && node.type === "root" && node.term !== newTitle.trim()) {
-        const oldTerm = node.term;
-        const oldId = SparkMD5.hash(oldTerm.toLowerCase());
-        const newTerm = newTitle.trim();
-        const newId = SparkMD5.hash(newTerm.toLowerCase());
-        setPreviewTitle(newTerm);
-        if (pdfBoundTerm === oldTerm) setPdfBoundTerm(newTerm);
-        getConceptNode(oldId).then(async (existing) => {
-          if (existing) {
-            existing.term = newTerm;
-            existing.id = newId;
-            putConceptNode(existing);
-            if (oldId !== newId) deleteConceptNode(oldId);
-          }
-          setTermList((prev) => {
-            const next = prev.map((t) => t.toLowerCase() === node.term.toLowerCase() ? newTerm : t);
-            localStorage.setItem(termListKey, JSON.stringify(next));
-            return next;
-          });
-          const group = workGroups.find((g) => g.id === activeGroupId);
-          if (group?.guide_map) {
-            const updateTerm = (n: GuideMapNode): GuideMapNode => ({
-              ...n,
-              term: n.term.toLowerCase() === node.term.toLowerCase() ? newTerm : n.term,
-              children: n.children.map(updateTerm),
-            });
-            group.guide_map = updateTerm(group.guide_map);
-            group.updated_at = Date.now();
-            putWorkGroup(group);
-            setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
-          }
-        });
-      }
-      setRenamingNodeId(null);
-    },
-    [findNode, termListKey, termList, activeGroupId, workGroups]
-  );
-
-  const handleDelete = useCallback(
-    (nodeId: string) => {
-      if (!confirm("确定要删除此节点？")) return;
-      const node = findNode(nodeId);
-      if (node && (node.type === "inquiry" || node.type === "reference")) {
-        const term = node.term;
-        const id = SparkMD5.hash(term.toLowerCase());
-        getConceptNode(id).then((existing) => {
-          if (existing) {
-            existing.custom_qa = existing.custom_qa.filter((qa) => qa.id !== nodeId);
-            existing.updated_at = Date.now();
-            putConceptNode(existing);
-          }
-        });
-      }
-      dispatchTree({ type: "REMOVE_NODE", nodeId });
-    },
-    [findNode]
-  );
-
-  const handleDragEnd = useCallback(
-    (sourceId: string, targetId: string, position: "before" | "inside" | "after") => {
-      const s = findNode(sourceId);
-      const t = findNode(targetId);
-      if (!s || !t || sourceId === targetId) return;
-      function isDesc(p: TreeNodeData, cid: string): boolean {
-        if (p.id === cid) return true;
-        return p.children.some((c) => isDesc(c, cid));
-      }
-      if (isDesc(s, targetId)) return;
-
-      const id = SparkMD5.hash(s.term.toLowerCase());
-      getConceptNode(id).then((existing) => {
-        if (!existing) return;
-        if (position === "inside") {
-          dispatchTree({ type: "REMOVE_NODE", nodeId: sourceId });
-          dispatchTree({ type: "ADD_CHILD", parentId: targetId, child: { ...s, parentId: targetId } });
-          const qa = existing.custom_qa.find((q) => q.id === sourceId);
-          if (qa) { qa.parent_node_id = targetId; existing.updated_at = Date.now(); putConceptNode(existing); }
-        } else {
-          const newParentId = t.parentId!;
-          if (s.parentId === newParentId) {
-            const srcIdx = existing.custom_qa.findIndex((q) => q.id === sourceId);
-            const tgtIdx = existing.custom_qa.findIndex((q) => q.id === targetId);
-            if (srcIdx !== -1 && tgtIdx !== -1) {
-              const [moved] = existing.custom_qa.splice(srcIdx, 1);
-              const newTgtIdx = existing.custom_qa.findIndex((q) => q.id === targetId);
-              existing.custom_qa.splice(position === "before" ? newTgtIdx : newTgtIdx + 1, 0, moved);
-              existing.updated_at = Date.now();
-              putConceptNode(existing);
-            }
-          } else {
-            const srcIdx = existing.custom_qa.findIndex((q) => q.id === sourceId);
-            if (srcIdx !== -1) {
-              const [moved] = existing.custom_qa.splice(srcIdx, 1);
-              moved.parent_node_id = newParentId;
-              let beforeCount = 0;
-              for (const q of existing.custom_qa) {
-                if (q.parent_node_id === newParentId) {
-                  if (q.id === targetId) { if (position === "after") beforeCount++; break; }
-                  beforeCount++;
-                }
-              }
-              let insertAt = existing.custom_qa.length;
-              let count = 0;
-              for (let i = 0; i < existing.custom_qa.length; i++) {
-                if (existing.custom_qa[i].parent_node_id === newParentId) {
-                  if (count === beforeCount) { insertAt = i; break; }
-                  count++;
-                }
-              }
-              existing.custom_qa.splice(insertAt, 0, moved);
-              existing.updated_at = Date.now();
-              putConceptNode(existing);
-            }
-            dispatchTree({ type: "REMOVE_NODE", nodeId: sourceId });
-            dispatchTree({ type: "ADD_CHILD", parentId: newParentId, child: { ...s, parentId: newParentId } });
-          }
-          const parentNode = findNode(newParentId);
-          if (parentNode) {
-            const childIds = parentNode.children.map((c) => c.id);
-            const filtered = childIds.filter((cid) => cid !== sourceId);
-            const ins = filtered.indexOf(targetId);
-            if (ins !== -1) {
-              filtered.splice(position === "before" ? ins : ins + 1, 0, sourceId);
-              dispatchTree({ type: "REORDER_CHILDREN", parentId: newParentId, childIds: filtered });
-            }
-          }
-        }
-      });
-    },
-    [findNode]
-  );
-
-  const handleTitleDoubleClick = useCallback(
-    (nodeId: string) => {
-      handleRename(nodeId);
-    },
-    [handleRename]
-  );
-
-  const handleEditContent = useCallback(
-    (nodeId: string) => {
-      const node = findNode(nodeId);
-      if (!node) return;
-      if (!node.expanded) {
-        dispatchTree({ type: "EXPAND_NODE", nodeId });
-      }
-      if (!node.content) {
-        dispatchTree({ type: "SET_NODE_CONTENT", nodeId, content: "" });
-        dispatchTree({ type: "SET_NODE_STATUS", nodeId, status: "done" });
-      }
-      setEditingNodeId(nodeId);
-    },
-    [findNode]
-  );
-
-  const handleEditingChange = useCallback(
-    (nodeId: string, value: string) => {
-      dispatchTree({ type: "SET_NODE_CONTENT", nodeId, content: value });
-    },
-    []
-  );
-
-  const handleEditSubmit = useCallback(
-    (nodeId: string) => {
-      const node = findNode(nodeId);
-      if (node?.content) {
-        dispatchTree({ type: "SET_NODE_TITLE", nodeId, title: extractTitle(node.content) });
-      }
-      if (node && (node.type === "inquiry" || node.type === "reference")) {
-        const id = SparkMD5.hash(node.term.toLowerCase());
-        getConceptNode(id).then((existing) => {
-          if (existing) {
-            const qa = existing.custom_qa.find((q: { id: string; answer?: string }) => q.id === nodeId);
-            if (qa) {
-              qa.answer = node.content ?? "";
-              existing.updated_at = Date.now();
-              putConceptNode(existing);
-            }
-          }
-        });
-      }
-      setEditingNodeId(null);
-    },
-    [findNode]
-  );
-
-  const handleContentDoubleClick = useCallback(
-    (nodeId: string) => {
-      const node = findNode(nodeId);
-      if (!node) return;
-      const newContent = prompt("编辑内容", node.content || "");
-      if (newContent !== null) {
-        dispatchTree({ type: "SET_NODE_CONTENT", nodeId, content: newContent });
-        dispatchTree({ type: "SET_NODE_STATUS", nodeId, status: "done" });
-        dispatchTree({ type: "SET_NODE_TITLE", nodeId, title: extractTitle(newContent) });
-      }
-    },
-    [findNode]
-  );
-
-  const handleViewToggle = useCallback(
-    (mode: "micro" | "macro") => {
-      dispatchTree({ type: "SET_VIEW_MODE", mode });
-    },
-    []
-  );
-
-  const handleFootprintNavigate = useCallback(
-    (index: number) => {
-      const node = footprint.nodes[index];
-      if (!node) return;
-      dispatchFootprint({ type: "NAVIGATE", index });
-      handleFocusTerm(node.term);
-    },
-    [footprint.nodes, handleFocusTerm]
-  );
+  const handleEditingChange = useCallback((session: Session, entry: Entry, value: string) => {
+    entry.userInput = value;
+  }, []);
+  const handleEditSubmit = useCallback(async (session: Session, entry: Entry) => {
+    setEditingEntry(null);
+    session.updated_at = Date.now();
+    await putSession(nodeRef.current!);
+    dispatchNode({ type: "REPLACE_SESSION", session: { ...nodeRef.current! } });
+  }, []);
 
   const handleWorkGroupSelect = useCallback(
     (groupId: string) => {
+      if (groupId === activeGroupId) return;
       navStoreRef.current.set(activeGroupId || "default", { history: navHistory, index: navIndex });
       const stored = navStoreRef.current.get(groupId) || { history: [], index: -1 };
       setNavHistory(stored.history);
       setNavIndex(stored.index);
       setActiveGroupId(groupId);
-      dispatchTree({ type: "CLEAR_ROOT" });
-      dispatchFootprint({ type: "CLEAR" });
+      localStorage.setItem("active_group_id", groupId);
+      targetNodeIdRef.current = null;
+      setGuideFocusPath([]);
+      dispatchNode({ type: "CLEAR_SESSION" });
       setShowGuideMap(false);
       setPreviewTitle("");
       setPreviewContent(null);
-      const saved = localStorage.getItem(`term_list_${groupId}`);
-      setTermList(saved ? (() => { try { return JSON.parse(saved); } catch { return []; } })() : []);
     },
     [activeGroupId, navHistory, navIndex]
   );
@@ -1171,13 +695,19 @@ export default function Home() {
       const group: WorkGroup = {
         id: crypto.randomUUID(),
         name,
-        root_term_ids: [],
         guide_map: null,
         created_at: Date.now(),
         updated_at: Date.now(),
       };
       await putWorkGroup(group);
       setWorkGroups((prev) => [...prev, group]);
+      localStorage.setItem("active_group_id", group.id);
+      targetNodeIdRef.current = null;
+      setGuideFocusPath([]);
+      dispatchNode({ type: "CLEAR_SESSION" });
+      setShowGuideMap(false);
+      setPreviewTitle("");
+      setPreviewContent(null);
       setActiveGroupId(group.id);
     },
     []
@@ -1196,11 +726,24 @@ export default function Home() {
 
   const handleWorkGroupDelete = useCallback(
     async (id: string) => {
+      const groupSessions = await getAllSessions(id);
+      await Promise.all(groupSessions.map((s) => deleteSession(s.id)));
       await deleteWG(id);
       setWorkGroups((prev) => prev.filter((g) => g.id !== id));
       if (activeGroupId === id) {
         const remaining = workGroups.filter((g) => g.id !== id);
-        setActiveGroupId(remaining[0]?.id || null);
+        localStorage.removeItem("active_group_id");
+        targetNodeIdRef.current = null;
+        setGuideFocusPath([]);
+        dispatchNode({ type: "CLEAR_SESSION" });
+        setPreviewTitle("");
+        setPreviewContent(null);
+        if (remaining[0]) {
+          setActiveGroupId(remaining[0].id);
+        } else {
+          setNodeList([]);
+          setActiveGroupId(null);
+        }
       }
     },
     [activeGroupId, workGroups]
@@ -1252,28 +795,6 @@ export default function Home() {
     [activeGroupId, workGroups]
   );
 
-  const ensureGuideMap = useCallback(async () => {
-    if (!activeGroupId) return;
-    const group = workGroups.find((g) => g.id === activeGroupId);
-    if (!group) return;
-    if (!group.guide_map) {
-      group.guide_map = { term: "", children: [] };
-      group.updated_at = Date.now();
-      await putWorkGroup(group);
-      setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
-    }
-    if (treeState.rootTerm && group.guide_map) {
-      const lower = treeState.rootTerm.toLowerCase();
-      const exists = group.guide_map.children.some((c) => c.term.toLowerCase() === lower);
-      if (!exists) {
-        group.guide_map = { ...group.guide_map, children: [...group.guide_map.children, { term: treeState.rootTerm, children: [] }] };
-        group.updated_at = Date.now();
-        putWorkGroup(group);
-        setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
-      }
-    }
-  }, [activeGroupId, workGroups, treeState.rootTerm]);
-
   const lastMapClickRef = useRef<{ term: string; time: number } | null>(null);
   const [guideFocusPath, setGuideFocusPath] = useState<number[]>([]);
 
@@ -1284,34 +805,19 @@ export default function Home() {
       if (last && last.term === term && now - last.time < 600) {
         const parentPath = nodePath ? nodePath.slice(0, -1) : guideFocusPath;
         setGuideFocusPath(parentPath);
-        handleFocusTerm(term);
+        handleFocusNode(term);
         setShowGuideMap(false);
         lastMapClickRef.current = null;
       } else {
         lastMapClickRef.current = { term, time: now };
         setPreviewTitle(term);
 
-        const id = SparkMD5.hash(term.toLowerCase());
-        const cached = await getConceptNode(id);
-        if (cached) {
+        const s = nodeList.find(n => n.title.toLowerCase() === term.toLowerCase());
+        if (s) {
           const lines: string[] = [];
-          const presets = [
-            { icon: "🌳", label: "动态直觉", field: "micro_intuition" },
-            { icon: "📐", label: "看定义", field: "micro_definition" },
-            { icon: "🔧", label: "看应用", field: "micro_application" },
-            { icon: "📜", label: "看动机", field: "micro_motivation" },
-          ];
-          for (const p of presets) {
-            const val = cached[p.field as keyof ConceptNode] as string | null;
-            lines.push(`  ${p.icon} ${p.label}${val ? "" : " (未生成)"}`);
-            const subQAs = cached.custom_qa.filter((qa) => qa.parent_node_id === `preset:${p.field}`);
-            for (const qa of subQAs) {
-              lines.push(`    ${qa.type === "inquiry" ? "💬" : "📖"} ${qa.question || extractTitle(qa.answer) || "空节点"}`);
-            }
-          }
-          const rootQAs = cached.custom_qa.filter((qa) => qa.parent_node_id === "root");
-          for (const qa of rootQAs) {
-            lines.push(`  ${qa.type === "inquiry" ? "💬" : "📖"} ${qa.question || extractTitle(qa.answer) || "空节点"}`);
+          for (const entry of s.entries) {
+            const firstLine = entry.userInput.split('\n')[0].slice(0, 30);
+            lines.push(`  💬 ${firstLine}`);
           }
           setPreviewContent(lines.join("\n"));
         } else {
@@ -1319,7 +825,7 @@ export default function Home() {
         }
       }
     },
-    [handleFocusTerm, guideFocusPath]
+    [handleFocusNode, guideFocusPath]
   );
 
   const handleGuideMapNavigate = useCallback((focusPath: number[], pathStr: string) => {
@@ -1361,7 +867,7 @@ export default function Home() {
     (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (showGuideMap) return;
-        if (treeState.rootNode) {
+        if (nodeState.session) {
             const entry: NavEntry = { type: "guideMap", pathStr: "根", focusPath: guideFocusPath };
             navPushedRef.current = false;
             setNavHistory((prev) => {
@@ -1376,13 +882,12 @@ export default function Home() {
       }
         if (e.altKey && e.key === "ArrowLeft" && navIndex > 0) {
           e.preventDefault();
-          skipHistoryRef.current = true;
           setNavIndex(navIndex - 1);
           const entry = navHistory[navIndex - 1];
           if (!entry) return;
           if (entry.type === "tree") {
             setShowGuideMap(false);
-            handleFocusTerm(entry.term);
+            handleFocusNode(entry.term, true);
           } else {
             setShowGuideMap(true);
             setGuideFocusPath(entry.focusPath);
@@ -1390,28 +895,25 @@ export default function Home() {
         }
         if (e.altKey && e.key === "ArrowRight" && navIndex < navHistory.length - 1) {
           e.preventDefault();
-          skipHistoryRef.current = true;
           setNavIndex(navIndex + 1);
           const entry = navHistory[navIndex + 1];
           if (!entry) return;
           if (entry.type === "tree") {
             setShowGuideMap(false);
-            handleFocusTerm(entry.term);
-        } else {
-          setShowGuideMap(true);
-          setGuideFocusPath(entry.focusPath);
+            handleFocusNode(entry.term, true);
+          } else {
+            setShowGuideMap(true);
+            setGuideFocusPath(entry.focusPath);
+          }
         }
-      }
     },
-    [showGuideMap, treeState.rootNode, ensureGuideMap, navHistory, navIndex, handleFocusTerm, guideFocusPath]
+    [showGuideMap, nodeState.session, ensureGuideMap, navHistory, navIndex, handleFocusNode, guideFocusPath]
   );
 
   useEffect(() => {
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
-
-  const hasRoot = !!treeState.rootNode;
 
   const [isResizing, setIsResizing] = useState(false);
   const handleResizeStart = useCallback(
@@ -1443,10 +945,42 @@ export default function Home() {
     [leftWidth, rightWidth]
   );
 
+  const hoverNode = hoverTermPreview ? nodeList.find((s) => s.title === hoverTermPreview) : null;
+  const hoverPreviewLine = hoverNode?.entries?.[0]?.userInput?.split("\n")[0].slice(0, 30) ?? null;
+
   return (
-    <TermListContext.Provider value={termList}>
+    <NodeListContext.Provider value={nodeList.map(s => s.title)}>
     <TooltipProvider delayDuration={200}>
       <div className="flex h-screen overflow-hidden">
+        {contextTarget && (() => {
+          const isSession = contextTarget.type === "session";
+          const s = contextNodeRef.current;
+          const entries = s?.entries ?? [];
+          const isLast = entries.length > 0 && entries[entries.length - 1] === (contextTarget as { type: "entry"; entry: Entry }).entry;
+          const editable = !isSession && isLast && !("entry" in contextTarget ? contextTarget.entry.assistantOutput : true);
+          const sessionItems = [
+            { icon: <Plus className="w-4 h-4" />, label: "新增上下文", onClick: () => { const s = contextNodeRef.current; if (s) { s.entries = [...s.entries, createEntry("note", "")]; s.updated_at = Date.now(); putSession(nodeRef.current!); dispatchNode({ type: "REPLACE_SESSION", session: { ...nodeRef.current! } }); } closeContext(); } },
+            { icon: <Pencil className="w-4 h-4" />, label: "重命名", onClick: () => { const s = contextNodeRef.current; if (s) handleRenameNode(s); closeContext(); } },
+            { icon: <Trash2 className="w-4 h-4" />, label: "删除", onClick: () => { handleDeleteNodeFromMenu((contextTarget as { type: "session"; id: string }).id); }, danger: true },
+          ];
+          const entryItems: any[] = [];
+          if (editable) {
+            entryItems.push({ icon: <Pencil className="w-4 h-4" />, label: "编辑", onClick: () => { setEditingEntry((contextTarget as { type: "entry"; entry: Entry }).entry); closeContext(); } });
+          }
+          entryItems.push(
+            { icon: <Copy className="w-4 h-4" />, label: "复制", onClick: () => { const e = (contextTarget as { type: "entry"; entry: Entry }).entry; navigator.clipboard.writeText((e.userInput || "") + (e.assistantOutput ? "\n\n" + e.assistantOutput : "")); closeContext(); } },
+            { icon: <GitBranch className="w-4 h-4" />, label: "从此处分支", onClick: () => { const s2 = contextNodeRef.current; if (s2) handleForkEntry(s2, (contextTarget as { type: "entry"; entry: Entry }).entry); closeContext(); } },
+            { icon: <Trash2 className="w-4 h-4" />, label: "删除", onClick: () => { const s2 = contextNodeRef.current; if (s2) handleDeleteEntry(s2, (contextTarget as { type: "entry"; entry: Entry }).entry); closeContext(); }, danger: true },
+          );
+          return (
+          <ContextMenu
+            x={contextPos.x}
+            y={contextPos.y}
+            onClose={closeContext}
+            items={isSession ? sessionItems : entryItems}
+          />
+          );
+        })()}
             <aside style={{ width: leftCollapsed ? 0 : leftWidth }} className={cn("shrink-0 bg-background flex flex-col overflow-hidden", !isResizing && "transition-[width] duration-300 ease-in-out", !leftCollapsed && "border-r")}>
               <div className="px-4 py-2 border-b flex items-center justify-between shrink-0">
                 <span className="font-bold text-base">🌳 OmniExplore</span>
@@ -1467,10 +1001,12 @@ export default function Home() {
           <div className="px-3 pt-2 shrink-0">
             <button
               onClick={() => {
-                dispatchTree({ type: "CLEAR_ROOT" });
-                dispatchFootprint({ type: "CLEAR" });
-                dispatchTree({ type: "SET_ACTIVE_TAG", parentId: "root", title: "" });
+                targetNodeIdRef.current = null;
+                dispatchNode({ type: "CLEAR_SESSION" });
                 setShowGuideMap(false);
+                setPreviewTitle("");
+                setPreviewContent(null);
+                setSidebarSearch("");
                 setFillValue("");
               }}
               className="w-full flex items-center justify-center gap-1 rounded-md border border-dashed border-muted-foreground/30 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
@@ -1485,32 +1021,34 @@ export default function Home() {
               <input
                 value={sidebarSearch}
                 onChange={(e) => setSidebarSearch(e.target.value)}
-                placeholder={leftTab === "terms" ? "搜索节点…" : "搜索文件…"}
+                placeholder={leftTab === "nodes" ? "搜索节点…" : "搜索文件…"}
                 className="w-full h-8 rounded-md border border-input bg-transparent pl-8 pr-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               />
             </div>
           </div>
           <div className="flex items-center gap-4 px-4 pb-1.5 shrink-0">
-            <button onClick={() => setLeftTab("terms")} className={cn("text-[13px] font-semibold", leftTab === "terms" ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>节点</button>
+            <button onClick={() => setLeftTab("nodes")} className={cn("text-[13px] font-semibold", leftTab === "nodes" ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>节点</button>
             <button onClick={() => setLeftTab("files")} className={cn("text-[13px] font-semibold", leftTab === "files" ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>文件</button>
           </div>
           <div className="flex-1 overflow-hidden px-4">
-            {leftTab === "terms" ? (
-            <TermLibrary
-              terms={termList}
-              currentTerm={treeState.rootTerm}
-              search={leftTab === "terms" ? sidebarSearch : undefined}
-              onTermClick={handleFocusTerm}
-              onTermDelete={(term) => {
-                saveTermList(termList.filter((t) => t !== term));
+            {leftTab === "nodes" ? (
+            <NodeLibrary
+              nodeTitles={nodeList.filter(s => !s.parentSessionId).map(s => s.title)}
+              currentNodeTitle={nodeState.session?.title ?? ""}
+              search={leftTab === "nodes" && sidebarSearch ? sidebarSearch : undefined}
+              onNodeClick={(term) => {
+                handleFocusNode(term);
+              }}
+              onNodeDelete={(term) => {
+                const s = nodeList.find(x => x.title === term);
+                if (s) { deleteSession(s.id); setNodeList(prev => prev.filter(x => x.id !== s.id)); }
                 if (activePdf && term.toLowerCase() === activePdf.name.replace(/\.[^.]+$/, "").toLowerCase()) {
-                  setPdfBoundTerm(null);
+                  setPdfBoundNode(null);
                   pdfBindingsRef.current.delete(activePdf.name);
                   saveBindings();
                 }
-                if (treeState.rootTerm === term) {
-                  dispatchTree({ type: "CLEAR_ROOT" });
-                  dispatchFootprint({ type: "CLEAR" });
+                if (nodeState.session?.title === term) {
+                  dispatchNode({ type: "CLEAR_SESSION" });
                   setPreviewTitle("");
                   setPreviewContent(null);
                 }
@@ -1529,43 +1067,35 @@ export default function Home() {
                   }
                 }
               }}
-              onTermRename={(oldTerm, newTerm) => {
+              onNodeRename={(oldTerm, newTerm) => {
                 if (!newTerm || oldTerm === newTerm) return;
-                saveTermList(termList.map((t) => t === oldTerm ? newTerm : t));
-                if (treeState.rootTerm === oldTerm) {
-        if (pdfBoundRef.current === oldTerm) {
-          setPdfBoundTerm(newTerm);
+                if (nodeState.session?.title === oldTerm) {
+        if (pdfBoundNodeRef.current === oldTerm) {
+          setPdfBoundNode(newTerm);
           pdfBindingsRef.current.forEach((v, k) => { if (v === oldTerm) pdfBindingsRef.current.set(k, newTerm); });
           saveBindings();
         }
                   setPreviewTitle(newTerm);
-                  const oldId = SparkMD5.hash(oldTerm.toLowerCase());
-                  const newId = SparkMD5.hash(newTerm.toLowerCase());
-                  getConceptNode(oldId).then(async (existing) => {
-                    if (existing) {
-                      existing.term = newTerm;
-                      existing.id = newId;
-                      putConceptNode(existing);
-                      if (oldId !== newId) deleteConceptNode(oldId);
-                    }
-                    const group = workGroups.find((g) => g.id === activeGroupId);
-                    if (group?.guide_map) {
-                      const updateTerm = (n: GuideMapNode): GuideMapNode => ({
-                        ...n, term: n.term.toLowerCase() === oldTerm.toLowerCase() ? newTerm : n.term,
-                        children: n.children.map(updateTerm),
-                      });
-                      group.guide_map = updateTerm(group.guide_map);
-                      group.updated_at = Date.now();
-                      putWorkGroup(group);
-                      setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
-                    }
-                  });
-                  dispatchTree({ type: "SET_NODE_TITLE", nodeId: "root", title: newTerm });
+                  const s = nodeList.find(n => n.title === oldTerm);
+                  if (s) {
+                    s.title = newTerm;
+                    s.updated_at = Date.now();
+                    putSession(s);
+                    setNodeList(prev => prev.map(n => n.id === s.id ? { ...n, title: newTerm } : n));
+                  }
+                  const group = workGroups.find((g) => g.id === activeGroupId);
+                  if (group?.guide_map) {
+                    const updateTerm = (n: GuideMapNode): GuideMapNode => ({
+                      ...n, term: n.term.toLowerCase() === oldTerm.toLowerCase() ? newTerm : n.term,
+                      children: n.children.map(updateTerm),
+                    });
+                    group.guide_map = updateTerm(group.guide_map);
+                    group.updated_at = Date.now();
+                    putWorkGroup(group);
+                    setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
+                  }
+                  dispatchNode({ type: "RENAME_SESSION", title: newTerm });
                 }
-              }}
-              onNewTerm={() => {
-                dispatchTree({ type: "CLEAR_ROOT" });
-                dispatchFootprint({ type: "CLEAR" });
               }}
               showGuideMap={showGuideMap}
               onAddToGuideMap={showGuideMap ? (term) => {
@@ -1623,9 +1153,9 @@ export default function Home() {
               files={storedFiles}
               onFileClick={(file) => {
                 setActivePdf(file);
-                if (!treeState.rootTerm) {
+                if (!nodeState.session?.title) {
                   const bound = pdfBindingsRef.current.get(file.name);
-                  handleFocusTerm(bound || file.name.replace(/\.[^.]+$/, ""));
+                  handleFocusNode(bound || file.name.replace(/\.[^.]+$/, ""));
                 }
               }}
               search={leftTab === "files" ? sidebarSearch : undefined}
@@ -1636,8 +1166,17 @@ export default function Home() {
           </div>
           <div className="border-t p-1.5">
             <SettingsPanel
-              termList={allTerms}
-              onTermDelete={(term) => saveTermList(termList.filter((t) => t !== term))}
+                nodeTitles={nodeList.filter(s => !s.parentSessionId).map(s => s.title)}
+                onNodeDelete={(term) => {
+                  const s = nodeList.find(x => x.title === term);
+                  if (s) { deleteSession(s.id); setNodeList(prev => prev.filter(x => x.id !== s.id)); }
+                  if (nodeState.session?.title === term) {
+      dispatchNode({ type: "CLEAR_SESSION" });
+      targetNodeIdRef.current = null;
+                    setPreviewTitle("");
+                    setPreviewContent(null);
+                  }
+                }}
               plusMenuItems={plusMenuItems}
               onPlusMenuItemsChange={savePlusMenu}
               selectionMenuItems={selectionMenuItems}
@@ -1667,78 +1206,46 @@ export default function Home() {
           <header className="flex items-center px-4 py-2 border-b shrink-0">
             <div className="flex items-center gap-3 flex-1">
               <div className="flex items-center gap-0.5">
-                <Popover open={backOpen} onOpenChange={setBackOpen}>
-                  <PopoverTrigger asChild>
-                    <button
-                      disabled={navIndex <= 0}
-                      className="p-0.5 rounded hover:bg-accent disabled:opacity-30 transition-colors"
-                      title="Alt+← 后退"
-                    >
-                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-48 max-h-60 overflow-auto" align="start">
-                    {navHistory.slice(0, navIndex).filter(e => !navEntryEq(e, navHistory[navIndex])).reverse().map((entry, i) => (
-                      <button
-                        key={`${navEntryLabel(entry)}-${i}`}
-                        className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent truncate"
-                        onClick={() => {
-                          setBackOpen(false);
-                          skipHistoryRef.current = true;
-                          setNavIndex(navIndex - 1 - i);
-                          if (entry.type === "tree") {
-                            setShowGuideMap(false);
-                            handleFocusTerm(entry.term);
-                          } else {
-                            setShowGuideMap(true);
-                            setGuideFocusPath(entry.focusPath);
-                          }
-                        }}
-                      >
-                        {navEntryLabel(entry)}
-                      </button>
-                    ))}
-                    {navIndex <= 0 && (
-                      <p className="px-2 py-4 text-sm text-muted-foreground text-center">无历史</p>
-                    )}
-                  </PopoverContent>
-                </Popover>
-                <Popover open={fwdOpen} onOpenChange={setFwdOpen}>
-                  <PopoverTrigger asChild>
-                    <button
-                      disabled={navIndex >= navHistory.length - 1}
-                      className="p-0.5 rounded hover:bg-accent disabled:opacity-30 transition-colors"
-                      title="Alt+→ 前进"
-                    >
-                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-48 max-h-60 overflow-auto" align="start">
-                    {navHistory.slice(navIndex + 1).map((entry, i) => (
-                      <button
-                        key={`${navEntryLabel(entry)}-${i}`}
-                        className="flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-accent truncate"
-                        onClick={() => {
-                          setFwdOpen(false);
-                          skipHistoryRef.current = true;
-                          setNavIndex(navIndex + 1 + i);
-                          if (entry.type === "tree") {
-                            setShowGuideMap(false);
-                            handleFocusTerm(entry.term);
-                          } else {
-                            setShowGuideMap(true);
-                            setGuideFocusPath(entry.focusPath);
-                          }
-                        }}
-                      >
-                        {navEntryLabel(entry)}
-                      </button>
-                    ))}
-                    {navIndex >= navHistory.length - 1 && (
-                      <p className="px-2 py-4 text-sm text-muted-foreground text-center">已是最新</p>
-                    )}
-                  </PopoverContent>
-                </Popover>
+                <button
+                  disabled={navIndex <= 0}
+                  onClick={() => {
+                    if (navIndex <= 0) return;
+                    setNavIndex(navIndex - 1);
+                    const entry = navHistory[navIndex - 1];
+                    if (!entry) return;
+                    if (entry.type === "tree") {
+                      setShowGuideMap(false);
+                      handleFocusNode(entry.term, true);
+                    } else {
+                      setShowGuideMap(true);
+                      setGuideFocusPath(entry.focusPath);
+                    }
+                  }}
+                  className="p-0.5 rounded hover:bg-accent disabled:opacity-30 transition-colors"
+                  title="Alt+← 后退"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
+                </button>
+                <button
+                  disabled={navIndex >= navHistory.length - 1}
+                  onClick={() => {
+                    if (navIndex >= navHistory.length - 1) return;
+                    setNavIndex(navIndex + 1);
+                    const entry = navHistory[navIndex + 1];
+                    if (!entry) return;
+                    if (entry.type === "tree") {
+                      setShowGuideMap(false);
+                      handleFocusNode(entry.term, true);
+                    } else {
+                      setShowGuideMap(true);
+                      setGuideFocusPath(entry.focusPath);
+                    }
+                  }}
+                  className="p-0.5 rounded hover:bg-accent disabled:opacity-30 transition-colors"
+                  title="Alt+→ 前进"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                </button>
               </div>
               <span className="font-semibold text-base">{activeGroup?.name || "OmniExplore"}</span>
               {showGuideMap && (
@@ -1763,7 +1270,7 @@ export default function Home() {
           </header>
 
           <div className="flex-1 flex flex-col min-h-0 max-w-3xl mx-auto w-full">
-              {!showGuideMap && treeState.rootTerm && (
+              {!showGuideMap && nodeState.session && (
                 <div className="flex items-center px-4 py-2 border-b shrink-0">
                   <button
                     onClick={() => { ensureGuideMap(); setShowGuideMap(true); }}
@@ -1776,7 +1283,7 @@ export default function Home() {
                   <button
                     onClick={() => { ensureGuideMap(); setShowGuideMap(true); setGuideFocusPath([]); }}
                     className="text-xs px-1 py-0.5 rounded text-muted-foreground hover:text-foreground transition-colors ml-3 max-w-[120px] truncate"
-                  >根</button>
+                  >簇</button>
                   {buildBreadcrumbItems(activeGroup?.guide_map ?? null, guideFocusPath).map((item, i) => (
                     <span key={i} className="flex items-center gap-0.5">
                       <ChevronRight className="w-4 h-4 text-muted-foreground mx-0.5" />
@@ -1787,7 +1294,7 @@ export default function Home() {
                     </span>
                   ))}
                   <ChevronRight className="w-4 h-4 text-muted-foreground mx-0.5" />
-                  <span className="text-xs font-medium">{treeState.rootTerm}</span>
+                  <span className="text-xs font-medium">{nodeState.session?.title ?? ""}</span>
                 </div>
               )}
               {showGuideMap ? (
@@ -1795,34 +1302,24 @@ export default function Home() {
                 guideMap={activeGroup?.guide_map ?? null}
                 initialFocusPath={guideFocusPath}
                   onNodeClick={handleGuideMapNodeClick}
-                termList={termList}
-                currentFocusTerm={treeState.rootTerm}
+                termList={nodeList.filter(s => !s.parentSessionId).map(s => s.title)}
+                currentFocusTerm={nodeState.session?.title ?? ""}
                 onUpdate={handleGuideMapUpdate}
                 onBack={() => {
                   setShowGuideMap(false);
-                  if (treeState.rootTerm) {
-                    setPreviewTitle(treeState.rootTerm);
-                    const id = SparkMD5.hash(treeState.rootTerm.toLowerCase());
-                    getConceptNode(id).then((pcached) => {
-                      if (pcached) {
-                        const plines: string[] = [];
-                        const ppresets = [
-                          { icon: "🌳", label: "动态直觉", field: "micro_intuition" as const },
-                          { icon: "📐", label: "看定义", field: "micro_definition" as const },
-                          { icon: "🔧", label: "看应用", field: "micro_application" as const },
-                          { icon: "📜", label: "看动机", field: "micro_motivation" as const },
-                        ];
-                        for (const p of ppresets) {
-                          const val = pcached[p.field] as string | null;
-                          plines.push(`  ${p.icon} ${p.label}${val ? "" : " (未生成)"}`);
-                          const sub = pcached.custom_qa.filter((qa) => qa.parent_node_id === `preset:${p.field}`);
-                          for (const qa of sub) plines.push(`    ${qa.type === "inquiry" ? "💬" : "📖"} ${qa.question || extractTitle(qa.answer) || "空节点"}`);
-                        }
-                        const rootSub = pcached.custom_qa.filter((qa) => qa.parent_node_id === "root");
-                        for (const qa of rootSub) plines.push(`  ${qa.type === "inquiry" ? "💬" : "📖"} ${qa.question || extractTitle(qa.answer) || "空节点"}`);
-                        setPreviewContent(plines.join("\n"));
+                  if (nodeState.session?.title) {
+                    setPreviewTitle(nodeState.session.title);
+                    const s = nodeList.find(n => n.title.toLowerCase() === nodeState.session!.title.toLowerCase());
+                    if (s) {
+                      const plines: string[] = [];
+                      for (const entry of s.entries) {
+                        const firstLine = entry.userInput.split('\n')[0].slice(0, 30);
+                        plines.push(`  💬 ${firstLine}`);
                       }
-                    });
+                      setPreviewContent(plines.join("\n"));
+                    } else {
+                      setPreviewContent(null);
+                    }
                   }
                 }}
                 onNavigate={handleGuideMapNavigate}
@@ -1832,7 +1329,7 @@ export default function Home() {
                   const group = workGroups.find((g) => g.id === activeGroupId);
                   if (!group?.guide_map) return;
                   if (scopePath.length === 0) {
-                    group.guide_map = { term: "", children: termList.map((t) => ({ term: t, children: [] as GuideMapNode[] })) };
+                    group.guide_map = { term: "", children: nodeList.filter(s => !s.parentSessionId).map(s => s.title).map((t) => ({ term: t, children: [] as GuideMapNode[] })) };
                   } else {
                     let node: GuideMapNode | undefined;
                     if (group.guide_map.term === "") {
@@ -1863,54 +1360,49 @@ export default function Home() {
                   setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
                 }}
               />
-            ) : hasRoot ? (
-              <RecursiveTree
-                rootNode={treeState.rootNode}
-                selectedNodeId={treeState.selectedNodeId}
-                onToggleExpand={handleToggleExpand}
-                onSelect={handleSelect}
-                onTermDoubleClick={handleTermDoubleClick}
-                onTermContextMenu={handleTermContextMenu}
-                onPlusSelect={handlePlusSelect}
-                onCreateEmptyChild={handleCreateEmptyChild}
-                onEditContent={handleEditContent}
-                onRename={handleRename}
-                onDelete={handleDelete}
-                onDragEnd={handleDragEnd}
-                editingNodeId={editingNodeId}
-                renamingNodeId={renamingNodeId}
-                onEditingChange={handleEditingChange}
-                onEditSubmit={handleEditSubmit}
-                onRenameSubmit={handleRenameSubmit}
-                onSelectionContextMenu={handleSelectionContextMenu}
-                onTermHover={handleTermHover}
-                onTermLeave={handleTermLeave}
-                onFileLink={handleFileLink}
-                termPreview={hoverTermPreview}
-                termPreviewAnchor={hoverTermPreviewAnchor}
-                termPreviewTerm={hoverTermPreviewTerm}
-                onTermPreviewClose={handleTermLeave}
-                plusItems={plusMenuItems}
-              />
+            ) : nodeState.session ? (
+              <div className="flex-1 overflow-auto" onClick={() => handleSelectSession(null)}><div className="p-4">
+                <NodeView session={nodeState.session} depth={0}
+                  selectedEntry={nodeState.selectedEntry}
+                  selectedSession={nodeState.selectedSession}
+                  onSelectSession={handleSelectSession}
+                  onToggleExpand={handleToggleEntryExpand} onSelect={handleSelectEntry}
+                  onNodeContextMenu={handleNodeContextMenu} onEntryContextMenu={handleEntryContextMenu}
+                  onSelectionContextMenu={handleSelectionContextMenu}
+                  onTermDoubleClick={handleFocusNode} onTermHover={handleTermHover} onTermLeave={handleTermLeave} onFileLink={handleFileLink}
+                  onPlusSelect={handlePlusSelect} onCreateEmptyEntry={handleCreateEmptyEntry}
+                  onNodeFocus={(session, title) => {
+                    dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: session.id, title });
+                    targetNodeIdRef.current = session.id;
+                  }}
+                  onEditEntry={(session, entry) => setEditingEntry(entry)} onDeleteEntry={handleDeleteEntry} onForkEntry={handleForkEntry}
+                  onRenameNode={handleRenameNode} onDeleteNode={handleDeleteNodeFromMenu}
+                  contextTarget={contextTarget} contextPos={contextPos} onCloseContext={closeContext}
+                  plusItems={plusMenuItems} rootPlusItems={rootPlusMenuItems} editingEntry={editingEntry} renamingNodeId={renamingNodeId}
+                  onEditingChange={handleEditingChange} onEditSubmit={handleEditSubmit} onNodeRenameSubmit={handleNodeRenameSubmit}
+                />
+              </div></div>
             ) : (
               <Onboarding
                 recentTerms={recentInputs}
-                onTermClick={handleFocusTerm}
-                onSubmit={handleFocusTerm}
+                onTermClick={handleFocusNode}
+                onSubmit={handleFocusNode}
               />
             )}
 
               <InputBar
-                tagLabel={showGuideMap ? "在当前层级新增节点" : treeState.activeTag.title}
+                tagLabel={showGuideMap ? "在当前层级新增节点" : nodeState.activeTag.title}
                 tagPrefix={showGuideMap ? "" : undefined}
                 fillValue={fillValue}
-              onFocus={(text) => { setFillValue(""); handleFocusTerm(text); }}
+              onFocus={(text) => { setFillValue(""); handleFocusNode(text); }}
               onCreateChild={(text) => {
                 setFillValue("");
                 if (showGuideMap) {
                   handleAddGuideMapNode(text, guideFocusPath);
+                } else if (nodeState.session) {
+                  handleCreateEntry(text);
                 } else {
-                  handleCreateChild(text);
+                  handleFocusNode(text);
                 }
               }}
             />
@@ -1926,19 +1418,19 @@ export default function Home() {
             <div style={{ width: rightCollapsed ? 0 : rightWidth }} className={cn("shrink-0", !isResizing && "transition-[width] duration-300 ease-in-out", !activePdf && "overflow-hidden")}>
         {activePdf ? (
           <PDFViewer data={activePdf.data} fileName={activePdf.name} onClose={() => setActivePdf(null)}
-            boundTermExists={pdfBoundTerm !== null}
-            onCreateBoundTerm={() => {
+            boundNodeExists={pdfBoundNode !== null}
+            onCreateBoundNode={() => {
               const termName = activePdf.name.replace(/\.[^.]+$/, "");
-              handleFocusTerm(termName);
-              setPdfBoundTerm(termName);
+              handleFocusNode(termName);
+              setPdfBoundNode(termName);
               pdfBindingsRef.current.set(activePdf.name, termName);
               saveBindings();
             }}
-            onSelectionContextMenu={(e, sel) => handleSelectionContextMenu(e as any, sel, "root")}
+            onSelectionContextMenu={(e, sel) => handleSelectionContextMenu(e as any, sel, null)}
           />
         ) : (
         <PreviewPanel
-          termName={previewTitle}
+          nodeName={previewTitle}
           content={previewContent}
         />
         )}
@@ -1949,7 +1441,15 @@ export default function Home() {
             {toast}
           </div>
         )}
+        {hoverTermPreview && hoverTermPreviewAnchor && (
+          <HoverPreview
+            term={hoverTermPreviewTerm}
+            preview={hoverPreviewLine ?? hoverTermPreview}
+            anchorRect={hoverTermPreviewAnchor}
+            onClose={handleTermLeave}
+          />
+        )}
     </TooltipProvider>
-    </TermListContext.Provider>
+    </NodeListContext.Provider>
   );
 }
