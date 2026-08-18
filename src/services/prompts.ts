@@ -7,6 +7,13 @@ const TERM_ANNOTATION_RULE = `
 - 标注格式必须严格为 [[术语]]，没有空格
 `;
 
+export function defaultPrompt(node: string): { system: string; user: string } {
+  return {
+    system: "你是一个有帮助的人工智能助手。",
+    user: `简单介绍${node}`,
+  };
+}
+
 export function intuitionPrompt(term: string): { system: string; user: string } {
   return {
     system: `你是认知科学解释专家。你的任务是用日常可感知的类比解释抽象概念。

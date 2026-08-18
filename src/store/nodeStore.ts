@@ -1,79 +1,63 @@
-import type { Session, Entry, NodeStatus } from "@/types";
+import type { Node, Session, Entry, NodeStatus } from "@/types";
 
 export interface NodeState {
-  session: Session | null;
+  /** 当前聚焦的主题 Node */
+  node: Node | null;
   selectedEntry: Entry | null;
   selectedSession: Session | null;
   activeTag: { sessionId: string; title: string };
 }
 
 export type NodeAction =
-  | { type: "SET_SESSION"; session: Session }
-  | { type: "CLEAR_SESSION" }
-  | { type: "ADD_ENTRY"; entry: Entry }
-  | { type: "REMOVE_ENTRY"; entry: Entry }
-  | { type: "UPDATE_ENTRY"; entry: Entry; updates: Partial<Entry> }
-  | { type: "TOGGLE_ENTRY_EXPAND"; entry: Entry }
+  | { type: "SET_NODE"; node: Node }
+  | { type: "CLEAR_NODE" }
   | { type: "SET_ENTRY_STATUS"; entry: Entry; status: NodeStatus; errorMessage?: string }
-  | { type: "APPEND_STREAMING"; entry: Entry; chunk: string }
   | { type: "SET_STREAMING_CONTENT"; entry: Entry; content: string }
   | { type: "SET_SELECTED_ENTRY"; entry: Entry | null }
   | { type: "SET_SELECTED_SESSION"; session: Session | null }
   | { type: "SET_ACTIVE_TAG"; sessionId: string; title: string }
-  | { type: "RENAME_SESSION"; title: string }
-  | { type: "REPLACE_SESSION"; session: Session };
+  | { type: "RENAME_NODE"; title: string }
+  | { type: "REPLACE_NODE"; node: Node };
 
 export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
   switch (action.type) {
-    case "SET_SESSION":
-      return { ...state, session: action.session, selectedEntry: null };
-    case "CLEAR_SESSION":
-      return { ...state, session: null, selectedEntry: null, activeTag: { sessionId: "", title: "" } };
-    case "ADD_ENTRY":
-      if (!state.session) return state;
-      return { ...state, session: { ...state.session, entries: [...state.session.entries, action.entry], updated_at: Date.now() } };
-    case "REMOVE_ENTRY":
-      if (!state.session) return state;
-      return { ...state, session: { ...state.session, entries: state.session.entries.filter(e => e !== action.entry), updated_at: Date.now() }, selectedEntry: state.selectedEntry === action.entry ? null : state.selectedEntry };
-    case "UPDATE_ENTRY":
-      if (!state.session) return state;
-      Object.assign(action.entry, action.updates);
-      return { ...state, session: { ...state.session, updated_at: Date.now() } };
-    case "TOGGLE_ENTRY_EXPAND":
-      if (!state.session) return state;
-      action.entry.expanded = !action.entry.expanded;
-      return { ...state, session: { ...state.session, updated_at: Date.now() } };
+    case "SET_NODE":
+      return { ...state, node: action.node, selectedEntry: null };
+    case "CLEAR_NODE":
+      return { ...state, node: null, selectedEntry: null, selectedSession: null, activeTag: { sessionId: "", title: "" } };
     case "SET_ENTRY_STATUS":
-      if (!state.session) return state;
+      if (!state.node) return state;
       action.entry.status = action.status;
       if (action.errorMessage !== undefined) action.entry.errorMessage = action.errorMessage;
-      return { ...state, session: { ...state.session, updated_at: Date.now() } };
-    case "APPEND_STREAMING":
-      if (!state.session) return state;
-      action.entry.assistantOutput = (action.entry.assistantOutput ?? "") + action.chunk;
-      return { ...state, session: { ...state.session, updated_at: Date.now() } };
+      return { ...state };
     case "SET_STREAMING_CONTENT":
-      if (!state.session) return state;
+      if (!state.node) return state;
       action.entry.assistantOutput = action.content;
-      return { ...state, session: { ...state.session, updated_at: Date.now() } };
+      return { ...state };
     case "SET_SELECTED_ENTRY":
       return { ...state, selectedEntry: action.entry, selectedSession: null };
     case "SET_SELECTED_SESSION":
       return { ...state, selectedSession: action.session, selectedEntry: null };
     case "SET_ACTIVE_TAG":
       return { ...state, activeTag: { sessionId: action.sessionId, title: action.title } };
-    case "RENAME_SESSION":
-      if (!state.session) return state;
-      return { ...state, session: { ...state.session, title: action.title, updated_at: Date.now() } };
-    case "REPLACE_SESSION":
-      return { ...state, session: action.session };
+    case "RENAME_NODE":
+      if (!state.node) return state;
+      state.node.title = action.title;
+      state.node.updated_at = Date.now();
+      return { ...state };
+    case "REPLACE_NODE":
+      return { ...state, node: action.node };
     default:
       return state;
   }
 }
 
 export function getInitialNodeState(): NodeState {
-  return { session: null, selectedEntry: null, selectedSession: null, activeTag: { sessionId: "", title: "" } };
+  return { node: null, selectedEntry: null, selectedSession: null, activeTag: { sessionId: "", title: "" } };
+}
+
+export function createNode(title: string, groupId?: string): Node {
+  return { id: crypto.randomUUID(), title, sessions: [], groupId, created_at: Date.now(), updated_at: Date.now() };
 }
 
 export function createSession(title: string, groupId?: string): Session {

@@ -59,7 +59,7 @@ export function WorkGroupSwitcher({
       </button>
 
       {open && (
-        <div className="absolute left-4 right-4 top-full z-50 mt-0.5 rounded-md border bg-popover p-1 shadow-md animate-in fade-in-0 zoom-in-95">
+        <div className="absolute left-4 right-4 top-full z-50 mt-0.5 rounded-md border bg-popover p-1 text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95">
           {groups.map((group) => (
             <button
               key={group.id}

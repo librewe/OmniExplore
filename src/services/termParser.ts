@@ -1,27 +1,16 @@
-import type { ParsedSegment } from "@/types";
+export const TERM_EXPLICIT_START = "\uE000";
+export const TERM_EXPLICIT_END = "\uE001";
+export const TERM_FREE_START = "\uE002";
+export const TERM_FREE_END = "\uE003";
 
-export function parseTerms(text: string): ParsedSegment[] {
-  const regex = /\[\[([^\]]+)\]\]/g;
-  const segments: ParsedSegment[] = [];
-  let lastIndex = 0;
+const EXPLICIT_RE = /\[\[([^\]]+)\]\]/g;
 
-  for (const match of text.matchAll(regex)) {
-    if (match.index! > lastIndex) {
-      segments.push({ type: "text", content: text.slice(lastIndex, match.index) });
-    }
-    segments.push({ type: "term", content: match[1] });
-    lastIndex = match.index! + match[0].length;
-  }
-
-  if (lastIndex < text.length) {
-    segments.push({ type: "text", content: text.slice(lastIndex) });
-  }
-
-  return segments;
+export function encodeTerms(text: string): string {
+  return text.replace(EXPLICIT_RE, (_m, term: string) => `${TERM_EXPLICIT_START}${term}${TERM_EXPLICIT_END}`);
 }
 
-function matchFreeTerms(text: string, termList: string[]): ParsedSegment[] {
-  if (!termList.length) return [{ type: "text", content: text }];
+function encodeFreeTerms(text: string, termList: string[]): string {
+  if (!termList.length) return text;
   const sorted = [...termList].sort((a, b) => b.length - a.length);
   const escaped = sorted.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   const regex = new RegExp(`(${escaped.join("|")})`, "gi");
@@ -36,35 +25,27 @@ function matchFreeTerms(text: string, termList: string[]): ParsedSegment[] {
     return protectedRegions.some((r) => idx >= r.start && idx < r.end);
   }
 
-  const segments: ParsedSegment[] = [];
+  let out = "";
   let lastIndex = 0;
-
   for (const match of text.matchAll(regex)) {
     if (isProtected(match.index!)) continue;
-    if (match.index! > lastIndex) {
-      segments.push({ type: "text", content: text.slice(lastIndex, match.index!) });
-    }
-    segments.push({ type: "term", content: match[0] });
+    out += text.slice(lastIndex, match.index);
+    out += `${TERM_FREE_START}${match[0]}${TERM_FREE_END}`;
     lastIndex = match.index! + match[0].length;
   }
-
-  if (lastIndex < text.length) {
-    segments.push({ type: "text", content: text.slice(lastIndex) });
-  }
-
-  return segments;
+  out += text.slice(lastIndex);
+  return out;
 }
 
-export function parseWithTermList(text: string, termList: string[]): ParsedSegment[] {
-  if (!termList.length) return parseTerms(text);
-  const afterBracket = parseTerms(text);
-  const result: ParsedSegment[] = [];
-  for (const seg of afterBracket) {
-    if (seg.type === "term") {
-      result.push(seg);
-    } else {
-      result.push(...matchFreeTerms(seg.content, termList));
-    }
+export function encodeWithTermList(text: string, termList: string[]): string {
+  if (!termList.length) return encodeTerms(text);
+  let result = "";
+  let lastIndex = 0;
+  for (const m of text.matchAll(EXPLICIT_RE)) {
+    result += encodeFreeTerms(text.slice(lastIndex, m.index!), termList);
+    result += `${TERM_EXPLICIT_START}${m[1]}${TERM_EXPLICIT_END}`;
+    lastIndex = m.index! + m[0].length;
   }
+  result += encodeFreeTerms(text.slice(lastIndex), termList);
   return result;
 }

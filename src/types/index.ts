@@ -6,6 +6,21 @@ export interface LLMConfig {
   temperature: number;
 }
 
+/**
+ * Node = 主题（顶层容器）。Node 下可容纳多个根 Session，每个根 Session 再展开 entries/子 Session。
+ * Node 是侧栏/导图/术语标注/PDF 绑定的基本单位；Node 标题即"概念/主题"。
+ */
+export interface Node {
+  id: string;
+  title: string;
+  /** 根 Session 列表（平级，无 parentSessionId）。 */
+  sessions: Session[];
+  /** 所属工作组 ID。 */
+  groupId?: string;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface Entry {
   type: "qa" | "note";
   userInput: string;

@@ -31,8 +31,10 @@
     --foreground: 0 0% 98%;
     --card: 0 0% 10%;
     --card-foreground: 0 0% 98%;
+    --popover: 0 0% 10%;
+    --popover-foreground: 0 0% 98%;
     --primary: 220 85% 60%;
-    --primary-foreground: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
     --secondary: 0 0% 14.9%;
     --secondary-foreground: 0 0% 98%;
     --muted: 0 0% 14.9%;
@@ -54,6 +56,24 @@
   body {
     @apply bg-background text-foreground;
   }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 4px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.5);
+  }
 }
 
 @layer components {
@@ -69,8 +89,18 @@
     color: hsl(var(--primary) / 0.7);
   }
 
+  /* 主题切换瞬间：禁用除覆盖层外所有元素自身的 transition，保证与覆盖层淡出完全同步 */
+  html.theme-transition-disable *:not(.theme-fade-overlay),
+  html.theme-transition-disable *:not(.theme-fade-overlay)::before,
+  html.theme-transition-disable *:not(.theme-fade-overlay)::after {
+    transition: none !important;
+  }
+
   .tree-node-selected {
-    @apply bg-accent/50 rounded-r-md border-l-2 border-primary;
+    background-color: hsl(var(--accent) / 0.5);
+    border-radius: 0 0.375rem 0.375rem 0;
+    /* 内阴影模拟左侧高亮线，不占布局宽度（避免选中时行内容右移） */
+    box-shadow: inset 2px 0 0 0 hsl(var(--primary));
   }
 
   .drag-handle {

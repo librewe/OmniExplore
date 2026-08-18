@@ -42,7 +42,7 @@ export function Onboarding({ recentTerms, onTermClick, onSubmit }: OnboardingPro
                 <button
                   key={term}
                   onClick={() => onTermClick(term)}
-                  className="inline-flex items-center gap-1 rounded-full bg-accent px-3 py-1 text-xs hover:bg-primary/10 hover:text-primary transition-colors"
+                  className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-xs text-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
                 >
                   <Search className="w-3 h-3" />
                   {term}

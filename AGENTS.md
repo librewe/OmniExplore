@@ -6,23 +6,26 @@
 > 2026-08-11 — 数据模型重构：ConceptNode 树 → Node: Session/Entry 相互归纳结构。
 > 2026-08-13 — 重构完成：彻底删除旧 ConceptNode/TreeNode/树 reducer，命名统一 node，上下文链式传递实现，子 Session 仅嵌套存储。
 > 2026-08-13(b) — 工作组节点库隔离（Session.groupId + active_group_id 持久化 + 按组重载）、划词追问接入 fork 流程、parentEntryId→parentSessionId 更名（含 migrateData 迁移）、Entry.sessionId 死字段清除。
+> 2026-08-17 — 数据模型再重构：Node 从"根 Session"升级为**主题容器**（`Node.sessions: Session[]`），根 Session 降格为 Node 下平级子行；根 Session 加号菜单由四预设扩为**五预设**（Default + 四预设，`${term}`→`${node}`）；Node 加号改为直接创建根 Session；导图/术语标注/PDF 绑定/导航历史全部以 Node 为单位；migrateData 将旧根 Session 包装为 Node（同标题合并，幂等）。
+> 2026-08-18 — 深色主题接线（ThemeMenu 三态：亮/暗/跟随系统，localStorage `theme` 持久化 + layout 首帧防闪脚本 + NodeView 粘滞行改 CSS 变量 + color-mix 祖先高亮）；PlusMenu 改 createPortal 挂 body；右侧栏默认折叠；流式自动打断（新流启动时 abort 旧流，旧 entry 也置 done）；migrateData 合并键含 groupId（防跨组合并）。
 
 ## 项目定位
 
-本地优先的认知考古工具。纯前端 SPA（Next.js 静态导出），无后端，无 auth。用户创建 Node（根 Session）→ 在其中添加 Entry（上下文节点）→ 追问 LLM → Entry 可 fork 出子 Session → 递归展开。按 Esc 进入组合视图。左侧栏支持**节点**和**文件**两个 tab。
+本地优先的认知考古工具。纯前端 SPA（Next.js 静态导出），无后端，无 auth。用户创建 Node（主题）→ 在 Node 下创建根 Session → 添加 Entry（上下文节点）→ 追问 LLM → Entry 可 fork 出子 Session → 递归展开。按 Esc 进入组合视图。左侧栏支持**节点**和**文件**两个 tab。
 
 ## 关键理解
 
 ### 数据结构：互相归纳
 
 ```
-Node         =  the mutually reduction structured data itself
-Session      =  title + Entry[]
+Node         =  主题容器：title + Session[]（根 Session 列表）
+Session      =  title + Entry[]（根 Session 无 parentSessionId，挂 Node.sessions；子 Session 挂 entry.children）
 Entry        =  userInput + assistantOutput + Session[]（children）
 ```
 
-- Session 是 Node 树的**奇层点**，Entry 是**偶层点**。两者互相归纳，逐层嵌套。
-- "节点" 起始于根 Session（无 parentSessionId）——侧栏节点库显示的就是其标题，且按工作组隔离（`Session.groupId`）。
+- Node 是**奇层点（0 层）**，Session 是**偶层点（1 层）**，Entry 是**奇层点（2 层）**，之后交替嵌套。Node 下多个根 Session 平级。
+- Node 标题即"概念/主题"——侧栏节点库、导图 term、[[术语]]标注、PDF 绑定、悬停预览、导航历史全部以 Node 标题为单位。
+- "聚焦"只用于 Node（`handleFocusNode`）；"选中"用于 Session（`handleSelectSession`）。
 - Entry.children 存的是子 Session **对象引用**（非 ID），渲染时直接从树上取。
 - Entry 无独立 ID——操作均传递对象引用，就地修改。
 - Session.parentSessionId 是反向引用（子→父 Session）。Entry 无独立 ID，fork 源 entry 通过 `父.entries.findIndex(e => e.children.some(c => c.id === 子.id))` 定位。
@@ -31,16 +34,16 @@ Entry        =  userInput + assistantOutput + Session[]（children）
 
 | 视图 | 数据 | 用途 |
 |---|---|---|
-| `nodeRef.current` | 当前活跃的根 Node（树） | 中央渲染：NodeView 递归展开 |
-| `nodeList` | `Session[]`，仅根 Node | 侧栏 `nodeTitles` prop |
+| `nodeRef.current` | 当前聚焦的主题 Node（`Node.sessions` 树） | 中央渲染：NodeView 展开 Node → 根 Session → Entry → 子 Session |
+| `nodeList` | `Node[]`，当前工作组全部主题 | 侧栏 `nodeTitles` prop |
 
-> 注意：`nodeRef.current` 始终指向**根 Session**。子 Session 只作为 `entry.children` 对象嵌套在树中，绝不做独立顶层记录（否则刷新后子 Session entry 丢失）。
+> 注意：`nodeRef.current` 始终指向**主题 Node**。根 Session 作为 `node.sessions` 对象嵌套，子 Session 作为 `entry.children` 对象嵌套——绝不做独立顶层记录（否则刷新后数据丢失）。
 
 ### 就地修改 + 触发重渲染
 
-所有 handler 对 Session/Entry 做**就地修改**（不创建新对象），然后 `dispatchNode(REPLACE_SESSION, { ...nodeRef.current! })` 触发 React 重渲染。因为树上引用共享同一对象，修改自动可见。
+所有 handler 对 Node/Session/Entry 做**就地修改**（不创建新对象），然后 `dispatchNode(REPLACE_NODE, node: nodeRef.current!)` 触发 React 重渲染——reducer 返回新 state 对象（`{ ...state }`）但 **node 保持同一对象引用**，NodeView 重渲染时读取已就地修改的数据。因为树上引用共享同一对象，修改自动可见。
 
-> 关键坑：`REPLACE_SESSION` 用 `{ ...nodeRef.current }` 浅拷贝会创建新对象，导致持有旧对象引用的 ref（如 `targetNodeIdRef` 之前的对象版）过时。因此 target 目标统一存 **ID**（`targetNodeIdRef`），使用时通过 `findSessionInTree(id)` 在最新树中定位对象。
+> 关键坑（2026-08-14 修复）：早期 `REPLACE_SESSION` 用 `{ ...nodeRef.current }` 浅拷贝创建新根对象，导致侧栏 `nodeList` 快照与内存树对象分离、逐渐过期——连续添加 note 后切走再切回（`handleFocusNode` 用过期 nodeList 对象 `SET_SESSION`）会覆盖丢数据。现在 reducer 一律**保持 node 对象身份不变**，`nodeList` 与内存树永远共享同一对象，从根上消除过期快照问题。target 目标仍统一存 **ID**（`targetSessionIdRef`），通过 `findSessionInTree(id)` 定位对象。
 
 ### 上下文传递（已实现）
 
@@ -58,14 +61,13 @@ Entry        =  userInput + assistantOutput + Session[]（children）
 ### 核心数据流
 
 ```
-用户输入节点 → InputBar(tag 驱动)
-  → page.tsx handleCreateSession
-    → nodeStore createSession → dispatchSession(SET_SESSION)
-    → IndexedDB putSession
-    → NodeView 递归展开
-用户输入上下文 → InputBar(Enter)
+用户输入节点 → InputBar(无 tag)
+  → handleFocusNode → createNode（主题）
+    → nodeStore SET_NODE → putNode → NodeView 展开
+用户输入上下文 → InputBar(tag)
   → handleCreateEntry → 就地修改 Session.entries
-    → putSession 持久化 → REPLACE_SESSION 重渲染
+    → 未选中根 Session 时自动建根 Session（标题取输入截断）
+    → putNode 持久化 → REPLACE_NODE 重渲染
 ```
 
 ### 组件树
@@ -94,49 +96,55 @@ layout.tsx
 
 | Store | 机制 | 用途 |
 |---|---|---|
-| `nodeStore` | useReducer | 当前 Node(Session) 树：Session/Entry 增删改、选中、streaming 追加 |
+| `nodeStore` | useReducer | 当前 Node 树（Node.sessions 及嵌套 Session/Entry）：增删改、选中、streaming 追加 |
 | `configStore` | Zustand | LLM 配置、预设提示词、加号菜单项（localStorage 持久化） |
 | page 本地 state | useState/useRef | activeGroupId, showGuideMap, previewNode, navHistory, guideFocusPath, leftWidth/rightWidth, leftCollapsed/rightCollapsed, isResizing, leftTab, storedFiles, activePdf, pdfBoundNode, sidebarSearch... |
-| `nodeRef` | useRef | 当前根 Node 的引用（始终最新），handler 直接读取 |
-| `nodeList` | useState | 当前工作组的根 Node 列表（侧栏数据源），组切换时经 `loadNodeList(groupId)` 重载（带竞态序号守卫） |
-| `targetNodeIdRef` | useRef | +菜单/点击选中的目标 Session **ID**，Entry 操作优先写入此目标（存 ID 避免浅拷贝引用过时） |
-| `contextNodeRef` | useRef | 右键菜单被操作 Session 的引用 |
+| `nodeRef` | useRef | 当前聚焦的主题 Node 的引用（始终最新），handler 直接读取 |
+| `nodeList` | useState | 当前工作组的主题 Node 列表（侧栏数据源），组切换时经 `loadNodeList(groupId)` 重载（带竞态序号守卫） |
+| `targetSessionIdRef` | useRef | +菜单/点击选中的目标 Session **ID**，Entry 操作优先写入此目标（存 ID 避免浅拷贝引用过时）；未选中 Session 时为 null（输入自动建根 Session） |
+| `contextSessionRef` / `contextNodeRef` | useRef | 右键菜单被操作 Session / 主题 Node 的引用 |
+| `renameTargetRef` | useRef | inline 重命名目标（`{type:"node",node}` 或 `{type:"session",session}`） |
 | `streamingAbortRef` | useRef | 流式 AbortController，新流启动时 abort 旧流 |
 
-> 已删除的遗留 store/ref：`footprintStore`、`treeStore`、`sessionMapRef`、`targetSessionRef`（对象版）。
+> 已删除的遗留 store/ref：`footprintStore`、`treeStore`、`sessionMapRef`、`targetSessionRef`（对象版）、`targetNodeIdRef`（→`targetSessionIdRef`）、`renameNodeRef`（→`renameTargetRef`）。
 
 ### 关键约定
 
-- **节点占位符**：plus 菜单模板用 `${term}`（点击时替换为当前 session 标题再填充输入框）；划词菜单用 `${selected}`（选中文本）和 `${root}`（当前根节点名）
-- **IndexedDB**：`sessions` store 存 Node(Session) 对象（含嵌套 Entry/children，仅根 Session 顶层记录）；`work_groups` store 存工作组；`files` store 存 PDF 等文件
+- **节点占位符**：plus 菜单模板用 `${node}`（点击时替换为当前主题标题再填充输入框，`${term}` 兼容旧配置）；划词菜单用 `${selected}`（选中文本）和 `${root}`/`${node}`（当前主题名）
+- **IndexedDB**：`nodes` store 存主题 Node 对象（含嵌套根 Session/Entry/children，仅 Node 顶层记录）；`work_groups` store 存工作组；`files` store 存 PDF 等文件；`sessions` store 仅迁移用（历史遗留）
 - **localStorage**：`active_group_id` 存最近激活工作组（刷新恢复），`plus_menu_items` 存 +菜单，`selection_menu_items` 存划词菜单，`pdf_bindings` 存 PDF→节点绑定
 - **SSE 超时**：仅连接超时 30s，流式无总体超时
 - **Entry 类型**：`qa`（输入框/模板触发 LLM）、`note`（空上下文，用户笔记）
 - **Entry 标题**：无论折叠/展开均截断首行 30 字符（省略号按首行长度判断）；note 空内容显示"(双击或右键编辑)"
 - **note 渲染**：note 与 qa 内容统一走 TermText（markdown 渲染 + 术语标注）；文本段经 MarkdownRenderer inline 渲染、节点库术语自由匹配 + 显式 `[[术语]]` 均标注
-- **层级粘滞滚动**：Session/Entry 行 `position: sticky`，行秩交替计数（根 Session=0→entry=1→子 Session=2…），`top = 行秩 × 28px`（ROW_H 须小于行高约 30px 以覆盖阶梯缝隙，防止透出内容）；选中态实色背景
+- **层级粘滞滚动**：Session/Entry 行 `position: sticky`，行秩连续计数（Node=0→根 Session=1→entry=2→子 Session=3…），`top = 行秩 × 28px`（ROW_H 须小于行高约 30px 以覆盖阶梯缝隙，防止透出内容）；选中态实色背景
 - **System prompt**：硬编码 `"你是一个有帮助的人工智能助手"`，不暴露给用户编辑
 - **组合视图虚拟根**：`{term:"", children:[...]}`；GuideMapCanvas 检测 `!guideMap.term` 渲染 children 平级
-- **tag**：InputBar 的 `tagLabel` 来自 `nodeState.activeTag.title`
-- **新建菜单（+）**：根 Session 用**四预设**（动态直觉/看定义/看应用/看动机，system+user 配套，user 模板 `${term}` 发送前替换为节点名）；一般 Session 用 plusMenuItems（默认"精简概括一点"/"介绍更多"，可设置中自定义）；"新增上下文"固定常驻
-- **划词菜单**：聚焦 + 自定义模板（默认"简单介绍"/"指什么"/"为什么"，`${selected}` 替换选中文本、`${root}` 替换当前根节点名）；点击后从源 entry fork 出分支 Session 并填充输入框
-- **预设 system prompt**：四预设点击时经 `presetSystemRef` 记录对应 system，`handleCreateEntry` 发送时一次性使用（默认"你是一个有帮助的人工智能助手"）
+- **tag**：InputBar 的 `tagLabel` 来自 `nodeState.activeTag.title`——选中 Session 时为 Session 标题，否则为当前主题标题（"追加到 {主题}"）；未选中 Session 时输入直接提交视为追加到 node，自动新建根 Session（标题取输入截断）
+- **新建菜单（+）**：主题 Node 的 + **无菜单**，点击直接创建根 Session（"未命名"并立即 inline 重命名）；根 Session 用**五预设**（Default + 动态直觉/看定义/看应用/看动机，system+user 配套，user 模板 `${node}` 发送前替换为主题名）；一般 Session 用 plusMenuItems（默认"精简概括一点"/"介绍更多"，可设置中自定义）；"新增上下文"固定常驻
+- **划词菜单**：聚焦 + 自定义模板（默认"简单介绍"/"指什么"/"为什么"，`${selected}` 替换选中文本、`${root}` 替换当前主题名）；点击后从源 entry fork 出分支 Session 并填充输入框
+- **预设 system prompt**：五预设点击时经 `presetSystemRef` 记录对应 system，`handleCreateEntry` 发送时一次性使用（Default 与一般会话均用"你是一个有帮助的人工智能助手"）
 - **导航历史**：`NavEntry[]` 联合类型，每工作组独立；返回/前进按钮 + Alt+←/→ 直接跳转（无下拉列表）；侧栏节点点击经 `handleFocusNode` 推历史（可退回），导航触发时传 `silent=true` 跳过推历史避免污染
-- **术语悬停预览**：HoverPreview 组件（`pointer-events-none` 防卡滞），悬停标注术语显示节点首行摘要；80ms 显示延迟，点击任意处关闭
-- **工作组隔离**：节点库/导图/导航历史均按工作组隔离；节点归属 `Session.groupId`（仅根 Session 有效，子 Session 嵌套继承）；切换组时重置 target/guideFocusPath 并重载 nodeList
-- **数据迁移**：`migrateData()` 于启动时执行——旧 `parentEntryId`→`parentSessionId`、清 `Entry.sessionId`、无归属根 Session 补首个工作组 ID
+- **术语悬停预览**：HoverPreview 组件（`pointer-events-none` 防卡滞），悬停标注术语显示主题首行摘要（首个根 Session 的首个 entry 首行）；80ms 显示延迟，点击任意处关闭
+- **工作组隔离**：节点库/导图/导航历史均按工作组隔离；主题归属 `Node.groupId`（根 Session 嵌套继承）；切换组时重置 target/guideFocusPath 并重载 nodeList
+- **数据迁移**：`migrateData()` 于启动时执行——旧 `parentEntryId`→`parentSessionId`、清 `Entry.sessionId`、无归属根 Session 补首个工作组 ID；根 Session → 主题 Node 包装（仅当 nodes store 为空时执行，同标题根 Session 合并为一个 Node，**合并键含 `groupId`** 防跨组合并，幂等）
+- **深色主题**：ThemeMenu 三态（亮/暗/跟随系统），localStorage `theme` 持久化，layout.tsx 内联脚本首帧防闪（匹配 `prefers-color-scheme`）；NodeView 粘滞行背景用 CSS 变量（`hsl(var(--background))`）+ `color-mix` 祖先高亮；切换时挂 `theme-fade-overlay` 淡入过渡
 - **ESC 行为**：组合视图中沿面包屑退出，根层回树视图
 - **面包屑**："簇"代替"根"
-- **数据操作模式**：handler 对树上 Session/Entry **就地修改**，然后 `dispatchNode(REPLACE_SESSION, { ...nodeRef.current! })` 触发重渲染
-- **子 Session**：无独立 ID（仅 IndexedDB 持久化用），作为 `entry.children` 对象直接嵌套
+- **数据操作模式**：handler 对树上 Node/Session/Entry **就地修改**，然后 `dispatchNode(REPLACE_NODE, { ...nodeRef.current! })` 触发重渲染
+- **根 Session**：无独立顶层 IndexedDB 记录（作为 `node.sessions` 对象直接嵌套）；子 Session 作为 `entry.children` 对象直接嵌套
 - **流式**：`SET_STREAMING_CONTENT` 累积式设值（非增量追加），避免 SSE 重复
 - **编辑**：仅末位未响应 entry 可编辑（`isEditable = isLast && !assistantOutput`）；Escape 还原快照
 - **fork 命名**：`(分支#N)` 顺序编号；fork 后自动展开
-- **划词追问**：从源 entry fork 出子 Session（`parentSessionId` + `forkBoundary`），追加到分支并回答；无 entry 上下文（PDF 划词）时回退到当前根 Session
+- **划词追问**：从源 entry fork 出子 Session（`parentSessionId` + `forkBoundary`），追加到分支并回答；无 entry 上下文（PDF 划词）时回退到当前主题（未选中 Session 则提交时自动建根 Session）
+- **流式自动打断（现状，计划重构为排队等待）**：`streamingAbortRef` 新流启动时 abort 旧流；旧流被中断后其 entry **也置 `done`**（部分内容保留），避免图标永远停留"加载中"。缺点：旧流残留半截回答、浪费已消耗额度、依赖它的新流上下文残缺——计划改为等待而非打断（见未实现需求）
+- **右侧栏默认折叠**：`rightCollapsed` 初始 `true`（`prevRightCollapsedRef` 同步），PDF 打开自动展开、关闭恢复折叠前状态
 
 ### 未实现的需求（来自 简化需求.md）
 
 - 后续规划全部（撤销/重做、反向链接、浏览器插件等）
+- **LLM 中止（用户手动打断）**：目前仅新流启动时自动 abort 旧流，用户无法主动停止正在进行的流式输出——需在流式过程中提供中止按钮/快捷键（如 Esc 或 entry 行内停止按钮），中断后 entry 置 `done` 保留部分内容
+- **流式排队等待（重构，替代自动打断）**：现状新流启动时 abort 旧流，导致旧流残留半截回答、浪费已消耗额度、依赖它的新流上下文残缺。改为**等待而非打断**：新流发起前检测是否有流在跑——若新流的上下文链（同 Session 前序 entries / fork 祖先链）依赖旧流，则等待旧流自然完成后自动启动，保证上下文含完整答案；跨 Session/Node 的独立流可并行。涉及：`streamingAbortRef` 单槽 → `Map<entryId, AbortController>`、等待态 UI 提示（如"等待当前回答完成"）、新 entry 创建时机后移到旧流完成之后（否则其上下文仍会冻结半截旧答案）
 - LLM 对话面板风格（Assistant/User Amateur）
 - 工作组重命名/删除：`handleWorkGroupRename`/`handleWorkGroupDelete`（删组连带删组内节点）已实现但**未接线**——WorkGroupSwitcher 仅支持切换/创建，无重命名/删除入口，留待后续
 - tsconfig 未开启 `noUnusedLocals`，死代码需手动核查（建议后续开启使 build 自动报未使用项）
@@ -150,8 +158,8 @@ layout.tsx
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `src/app/page.tsx` | ~1450 | 主组件：全部 handler、状态、事件、快捷键、生命周期、上下文构建、PDF 集成 |
-| `src/components/NodeView.tsx` | ~243 | 递归 Node 树：Session/Entry 渲染、折叠/展开、fork、右键菜单、选中高亮、编辑 |
+| `src/app/page.tsx` | ~1550 | 主组件：全部 handler、状态、事件、快捷键、生命周期、上下文构建、PDF 集成 |
+| `src/components/NodeView.tsx` | ~290 | 主题 Node 包装层 + 递归 Session 树：Node 顶行（+直接建根 Session）、Session/Entry 渲染、折叠/展开、fork、右键菜单、选中高亮、编辑 |
 | `src/components/NodeLibrary.tsx` | ~130 | 节点列表（侧栏）：搜索、增删改、组合视图 +号 |
 | `src/lib/NodeListContext.ts` | ~9 | 节点列表 React Context（`useNodeList`） |
 | `src/components/GuideMapCanvas.tsx` | ~700 | 组合视图：DnD 拖拽组合、面包屑、图节点递归渲染、termCount 保护 |
@@ -159,18 +167,19 @@ layout.tsx
 | `src/components/SettingsPanel.tsx` | ~530 | 设置 Dialog |
 | `src/components/FilesList.tsx` | ~110 | 文件列表：拖拽上传、搜索、删除、点击打开 PDF |
 | `src/components/PDFViewer.tsx` | ~155 | PDF 阅读器：页码导航、Ctrl+滚轮缩放、文本层、右键聚焦菜单 |
-| `src/components/MarkdownRenderer.tsx` | ~60 | Markdown 渲染，支持文件链接 |
+| `src/components/MarkdownRenderer.tsx` | ~170 | Markdown 渲染，支持文件链接 + 术语占位符解码（`[[术语]]` 不破坏表格/标题等块级结构） |
 | `src/components/TermText.tsx` | ~80 | 术语标注文本渲染（`[[术语]]` 链接/高亮） |
 | `src/components/ContextMenu.tsx` | ~59 | 右键菜单组件（ContextMenu + ContextMenuContent） |
 | `src/components/PlusMenu.tsx` | ~80 | 加号下拉菜单 |
+| `src/components/ThemeMenu.tsx` | ~97 | 主题菜单：亮/暗/跟随系统三态切换 |
 | `src/components/PreviewPanel.tsx` | ~35 | 右侧树预览面板 |
 | `src/components/Onboarding.tsx` | ~45 | 初始界面（无 Node 时） |
-| `src/store/nodeStore.ts` | ~85 | Node(Session/Entry) reducer + createSession/createEntry |
-| `src/services/cache.ts` | ~126 | IndexedDB CRUD（sessions + files + work_groups stores）+ migrateData 数据迁移 |
+| `src/store/nodeStore.ts` | ~85 | Node(Session/Entry) reducer + createNode/createSession/createEntry |
+| `src/services/cache.ts` | ~160 | IndexedDB CRUD（nodes + files + work_groups stores）+ migrateData 数据迁移 |
 | `src/services/llm.ts` | ~125 | SSE 流式 LLM 调用（`streamLLM` + `streamLLMChat` 消息数组版） |
-| `src/services/prompts.ts` | ~85 | 预设提示词管理（4 个微观测度） |
-| `src/services/termParser.ts` | ~70 | 术语/文件链接解析，保护 markdown 链接不被拆散 |
-| `src/types/index.ts` | ~70 | 所有类型定义（Session, Entry, GuideMapNode, StoredFile 等） |
+| `src/services/prompts.ts` | ~95 | 预设提示词管理（Default + 4 个微观测度） |
+| `src/services/termParser.ts` | ~50 | 术语占位符编码（`[[术语]]`→私有区字符，避免拆分 markdown 块结构）+ 自由术语匹配 |
+| `src/types/index.ts` | ~80 | 所有类型定义（Node, Session, Entry, GuideMapNode, StoredFile 等） |
 | `src/lib/constants.ts` | ~25 | 预设定义、默认配置 |
 | `src/lib/utils.ts` | ~11 | `cn()` 工具函数 |
 

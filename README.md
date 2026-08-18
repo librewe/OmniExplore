@@ -96,7 +96,7 @@ LLM 连接在设置面板中配置：
 | Base URL | `https://open.bigmodel.cn/api/paas/v4/` |
 | Model | `glm-4-flash` |
 
-预设提示词的菜单标签和 prompt 模板同样在设置中可编辑。模板中使用 `${term}` 作为占位符，发送时自动替换。
+预设提示词的菜单标签和 prompt 模板同样在设置中可编辑。模板中使用 `${node}` 作为占位符，发送时自动替换为当前主题名称。
 
 ## License
 

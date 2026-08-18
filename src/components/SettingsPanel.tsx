@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { testConnection } from "@/services/llm";
 import { loadCustomPresetPrompts, saveCustomPresetPrompts } from "@/services/prompts";
-import { intuitionPrompt, definitionPrompt, applicationPrompt, motivationPrompt, loadInquirySystemPrompt, saveInquirySystemPrompt } from "@/services/prompts";
+import { defaultPrompt, intuitionPrompt, definitionPrompt, applicationPrompt, motivationPrompt, loadInquirySystemPrompt, saveInquirySystemPrompt } from "@/services/prompts";
 import { useConfigStore } from "@/store/configStore";
 import { DEFAULT_LLM_CONFIG, DEFAULT_INQUIRY_SYSTEM_PROMPT } from "@/lib/constants";
 import type { LLMConfig } from "@/types";
@@ -106,6 +106,7 @@ export function SettingsPanel({
   }, [presetOverrides]);
 
   const PRESET_LABELS: Record<string, string> = {
+    default: "⚡ Default",
     micro_intuition: "🌳 动态直觉",
     micro_definition: "📐 看定义",
     micro_application: "🔧 看应用",
@@ -113,10 +114,11 @@ export function SettingsPanel({
   };
 
   const PRESET_DEFAULTS: Record<string, { system: string; user: string }> = {
-    micro_intuition: intuitionPrompt("${term}"),
-    micro_definition: definitionPrompt("${term}"),
-    micro_application: applicationPrompt("${term}"),
-    micro_motivation: motivationPrompt("${term}"),
+    default: defaultPrompt("${node}"),
+    micro_intuition: intuitionPrompt("${node}"),
+    micro_definition: definitionPrompt("${node}"),
+    micro_application: applicationPrompt("${node}"),
+    micro_motivation: motivationPrompt("${node}"),
   };
 
   const getDefaultFor = (key: string) => PRESET_DEFAULTS[key] || { system: "", user: "" };
@@ -148,7 +150,7 @@ export function SettingsPanel({
           <div className="flex-1 overflow-auto">
             <TabsContent value="llm" className="p-6 m-0">
               <div className="space-y-4">
-                <div className="rounded-md bg-yellow-50 border border-yellow-200 p-3 text-xs text-yellow-800">
+                <div className="rounded-md bg-yellow-50 border border-yellow-200 p-3 text-xs text-yellow-800 dark:bg-yellow-500/10 dark:border-yellow-500/30 dark:text-yellow-200">
                   API Key 将明文存储在浏览器本地，请勿在公共设备上使用。
                 </div>
 
@@ -207,7 +209,7 @@ export function SettingsPanel({
                 {testResult && (
                   <div className={cn(
                     "rounded-md p-3 text-sm",
-                    testResult.ok ? "bg-green-50 text-green-800 border border-green-200" : "bg-red-50 text-red-800 border border-red-200"
+                    testResult.ok ? "bg-green-50 text-green-800 border border-green-200 dark:bg-green-500/10 dark:text-green-200 dark:border-green-500/30" : "bg-red-50 text-red-800 border border-red-200 dark:bg-red-500/10 dark:text-red-200 dark:border-red-500/30"
                   )}>
                     {testResult.message}
                   </div>
@@ -224,8 +226,8 @@ export function SettingsPanel({
 
             <TabsContent value="presets" className="p-6 m-0">
               <div className="space-y-3">
-                <p className="text-sm text-muted-foreground">自定义预设问题的提示词。{"${term}"} 在运行时替换为节点名称。</p>
-                {["micro_intuition", "micro_definition", "micro_application", "micro_motivation"].map((key) => {
+                <p className="text-sm text-muted-foreground">自定义预设问题的提示词。{"${node}"} 在运行时替换为主题名称。</p>
+                {["default", "micro_intuition", "micro_definition", "micro_application", "micro_motivation"].map((key) => {
                   const override = presetOverrides[key];
                   return (
                     <div key={key} className="border rounded-md p-3">
@@ -256,7 +258,7 @@ export function SettingsPanel({
                             />
                           </div>
                           <div>
-                            <label className="text-xs text-muted-foreground">User Prompt（{"${term}"} = 节点名称）</label>
+                            <label className="text-xs text-muted-foreground">User Prompt（{"${node}"} = 主题名称）</label>
                             <textarea
                               value={editPresetUser}
                               onChange={(e) => setEditPresetUser(e.target.value)}
@@ -282,7 +284,7 @@ export function SettingsPanel({
             <TabsContent value="templates" className="p-6 m-0">
               <div className="space-y-4">
                 <p className="text-sm text-muted-foreground">
-                  配置 + 菜单中的追问模板。{'${term}'} 占位符在运行时替换为节点名称。
+                  配置 + 菜单中的追问模板。{'${node}'} 占位符在运行时替换为主题名称。
                 </p>
 
                 {plusMenuItems.map((item) => (
@@ -298,7 +300,7 @@ export function SettingsPanel({
                         <Input
                           value={editMenuPrompt}
                           onChange={(e) => setEditMenuPrompt(e.target.value)}
-                          placeholder={"提示词（用 ${term} 占位）"}
+                          placeholder={"提示词（用 ${node} 占位）"}
                           className="text-sm"
                         />
                         <div className="flex gap-2">

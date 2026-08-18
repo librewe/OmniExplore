@@ -2,11 +2,13 @@
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { Send, CornerDownLeft } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 interface InputBarProps {
   tagLabel: string;
   fillValue?: string;
   tagPrefix?: string;
+  wide?: boolean;
   onFocus?: (text: string) => void;
   onCreateChild?: (text: string) => void;
   disabled?: boolean;
@@ -16,6 +18,7 @@ export function InputBar({
   tagLabel,
   fillValue,
   tagPrefix,
+  wide,
   onFocus,
   onCreateChild,
   disabled,
@@ -65,7 +68,7 @@ export function InputBar({
 
   return (
     <div className="bg-background px-4 pt-2 pb-4">
-      <div className="relative max-w-2xl mx-auto">
+      <div className={cn("relative mx-auto transition-[max-width] duration-300 ease-in-out", wide ? "max-w-3xl" : "max-w-2xl")}>
         {tagLabel && (
           <div className="inline-flex items-center gap-1 rounded-t-md bg-primary/10 text-primary px-2 py-0.5 text-xs mb-1">
             <CornerDownLeft className="w-3 h-3" />
@@ -85,7 +88,7 @@ export function InputBar({
                 ? "输入内容，Ctrl+回车发送…"
                 : "输入概念，按回车探索…"
             }
-            className="flex-1 h-10 rounded-2xl border border-input bg-transparent px-5 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+            className="omni-input-bar flex-1 h-10 rounded-2xl border border-input bg-transparent px-5 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
           />
           <button
             onClick={handleSend}

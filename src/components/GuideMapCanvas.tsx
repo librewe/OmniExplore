@@ -21,7 +21,6 @@ import {
   Pencil,
   Trash2,
   Network,
-  ArrowLeft,
   FolderOpen,
   Layers,
 } from "lucide-react";
@@ -71,6 +70,28 @@ export function buildBreadcrumbItems(
     items.push({ label: node?.term ?? "?", path: focusPath.slice(0, i + 1) });
   }
   return items;
+}
+
+/** 查找术语在导图中的路径（大小写不敏感，递归整棵树）；不存在返回 null */
+export function findNodePath(root: GuideMapNode | null, term: string): NodePath | null {
+  if (!root || !term) return null;
+  const lower = term.toLowerCase();
+  const search = (node: GuideMapNode, path: NodePath): NodePath | null => {
+    if (node.term && node.term.toLowerCase() === lower) return path;
+    for (let i = 0; i < node.children.length; i++) {
+      const found = search(node.children[i], [...path, i]);
+      if (found) return found;
+    }
+    return null;
+  };
+  if (root.term === "") {
+    for (let i = 0; i < root.children.length; i++) {
+      const found = search(root.children[i], [i]);
+      if (found) return found;
+    }
+    return null;
+  }
+  return search(root, []);
 }
 
 function removeNodeByPath(tree: GuideMapNode, path: NodePath): { tree: GuideMapNode; removed: GuideMapNode | null } {
@@ -226,8 +247,6 @@ export function GuideMapCanvas({
     return getNodeByPath(guideMap, focusPath);
   }, [guideMap, focusPath]);
 
-  const breadcrumb = useMemo(() => buildBreadcrumbItems(guideMap, focusPath), [guideMap, focusPath]);
-
   const visibleNodes = useMemo((): GuideMapNode[] => {
     if (!guideMap) return [];
     if (focusPath.length === 0) {
@@ -256,18 +275,23 @@ export function GuideMapCanvas({
 
   const handleESC = useCallback(() => {
     if (focusPath.length > 0) {
-      setFocusPath(focusPath.slice(0, -1));
+      const newPath = focusPath.slice(0, -1);
+      setFocusPath(newPath);
+      onFocusPathChange?.(newPath);
     } else {
+      // 根层 Esc 退出到树视图（循环回到树视图的当前节点）
       onBack();
     }
-  }, [focusPath, onBack]);
+  }, [focusPath, onBack, onFocusPathChange]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        handleESC();
-      }
+      if (e.key !== "Escape") return;
+      // 内联编辑输入框按 Esc 交给控件自身处理；最下方输入框不阻止（Esc 正常退出图层）
+      const t = e.target as HTMLElement | null;
+      if (t && !t.classList.contains("omni-input-bar") && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      e.preventDefault();
+      handleESC();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -312,6 +336,11 @@ export function GuideMapCanvas({
     onUpdate(newTree);
     setAddingToPath(null);
   }, [guideMap, addingToPath, newChildText, onUpdate]);
+
+  const handleCancelAdd = useCallback(() => {
+    setAddingToPath(null);
+    setNewChildText("");
+  }, []);
 
   const handleUpdateNode = useCallback(
     (path: NodePath, updated: GuideMapNode | null) => {
@@ -445,16 +474,9 @@ export function GuideMapCanvas({
 
   if (!guideMap) {
     return (
-      <div className="flex flex-col h-full">
-        <div className="flex items-center px-4 py-2 border-b">
-          <button onClick={onBack} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors">
-            <ArrowLeft className="w-4 h-4" /><span>返回</span>
-          </button>
-        </div>
-        <div className="flex flex-col items-center justify-center flex-1 gap-4">
-          <Network className="w-12 h-12 text-muted-foreground/30" />
-          <p className="text-sm text-muted-foreground">暂无节点</p>
-        </div>
+      <div className="flex flex-col items-center justify-center h-full gap-4">
+        <Network className="w-12 h-12 text-muted-foreground/30" />
+        <p className="text-sm text-muted-foreground">暂无节点</p>
       </div>
     );
   }
@@ -462,34 +484,6 @@ export function GuideMapCanvas({
   return (
     <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
       <div className="flex flex-col h-full">
-        <div className="flex items-center px-4 py-2 border-b shrink-0">
-          <div className="flex items-center gap-2">
-            <button onClick={handleESC} className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors" title={focusPath.length > 0 ? "ESC 返回上层" : "返回树视图"}>
-              <ArrowLeft className="w-4 h-4" />
-              <span className="text-xs">{focusPath.length > 0 ? "上层" : "返回"}</span>
-            </button>
-          </div>
-
-          <div className="flex items-center gap-0.5 ml-3">
-              <button onClick={() => setFocusPath([])} className={cn("text-xs px-1 py-0.5 rounded transition-colors", focusPath.length === 0 ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground")}>簇</button>
-              {breadcrumb.map((item, i) => (
-                <div key={i} className="flex items-center gap-0.5">
-                  <ChevronRight className="w-3 h-3 text-muted-foreground" />
-                  <button onClick={() => setFocusPath(item.path)} className={cn("text-xs px-1 py-0.5 rounded transition-colors max-w-[120px] truncate", i === breadcrumb.length - 1 ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground")}>{item.label}</button>
-                </div>
-              ))}
-            </div>
-
-          <div className="flex items-center gap-2 ml-auto">
-            {onRebuild && (
-              <button onClick={() => onRebuild(focusPath)} className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors" title="从节点库重建">
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 2v6h-6M3 12a9 9 0 0115.36-6.36L21 8M3 22v-6h6M21 12a9 9 0 01-15.36 6.36L3 16"/></svg>
-                <span>重建</span>
-              </button>
-            )}
-          </div>
-        </div>
-
         <ScrollArea className="flex-1">
           <div className="relative min-h-[300px] p-6 h-full">
             <div ref={setCanvasDropRef}
@@ -530,6 +524,7 @@ export function GuideMapCanvas({
                       onStartAdd={handleStartAdd}
                       onNewChildChange={setNewChildText}
                       onCommitAdd={handleCommitAdd}
+                      onCancelAdd={handleCancelAdd}
                     />
                   );
                 })}
@@ -560,7 +555,7 @@ function NodeCard({
   node, path, depth, selectedPathId, termList, currentFocusTerm,
   onNodeClick, onUpdateNode, onDissolveGroup, onEnterFocus,
   editingNodePath, editText, onStartEdit, onEditChange, onCommitEdit,
-  addingToPath, newChildText, onStartAdd, onNewChildChange, onCommitAdd,
+  addingToPath, newChildText, onStartAdd, onNewChildChange, onCommitAdd, onCancelAdd,
   parent, termCount,
 }: {
   node: GuideMapNode; path: NodePath; depth: number;   selectedPathId: string | null;
@@ -575,6 +570,7 @@ function NodeCard({
   addingToPath: string | null; newChildText: string;
   onStartAdd: (path: NodePath) => void;
   onNewChildChange: (text: string) => void; onCommitAdd: () => void;
+  onCancelAdd: () => void;
   parent?: GuideMapNode;
   termCount?: Map<string, number>;
 }) {
@@ -605,7 +601,7 @@ function NodeCard({
     <div
       ref={cardRef}
       data-card
-      className={cn("relative select-none w-fit pointer-events-auto", isDragging && "opacity-30")}
+      className={cn("relative select-none w-fit max-w-full pointer-events-auto", isDragging && "opacity-30")}
       onMouseEnter={() => setCardHovered(true)}
       onMouseLeave={() => setCardHovered(false)}
     >
@@ -671,7 +667,7 @@ function NodeCard({
 
           {isAdding && (
             <div className="px-3 pb-2" onClick={(e) => e.stopPropagation()}>
-              <Input value={newChildText} onChange={(e) => onNewChildChange(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") onCommitAdd(); if (e.key === "Escape") onCommitAdd(); }} onBlur={() => onCommitAdd()} placeholder="新节点名称" className="h-7 text-xs" autoFocus />
+              <Input value={newChildText} onChange={(e) => onNewChildChange(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") onCommitAdd(); if (e.key === "Escape") onCancelAdd(); }} onBlur={() => onCommitAdd()} placeholder="新节点名称" className="h-7 text-xs" autoFocus />
             </div>
           )}
 
@@ -689,7 +685,7 @@ function NodeCard({
                   editingNodePath={editingNodePath} editText={editText}
                   onStartEdit={onStartEdit} onEditChange={onEditChange} onCommitEdit={onCommitEdit}
                   addingToPath={addingToPath} newChildText={newChildText}
-                  onStartAdd={onStartAdd} onNewChildChange={onNewChildChange} onCommitAdd={onCommitAdd}
+                  onStartAdd={onStartAdd} onNewChildChange={onNewChildChange} onCommitAdd={onCommitAdd} onCancelAdd={onCancelAdd}
                 />
               ))}
             </div>
