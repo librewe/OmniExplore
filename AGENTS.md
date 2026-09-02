@@ -56,6 +56,14 @@ npm run check        # 提交前一键门禁：typecheck + test + lint 全过
 - **提交前**：`npm run check` 一条命令全过（typecheck + test + lint）
 - 涉及数据/类型改动用 `npm run typecheck` 验证即可；涉及 `contextBuilder`/`segments` 等纯逻辑改动补跑 `npm test`；仅路由、静态资源、next 配置类改动才需要完整 build
 
+## GitHub Pages 部署
+
+- 公开仓库免费部署，`.github/workflows/deploy.yml` 自动构建 `out/` 并发布（push main 触发）
+- **basePath 动态化**（next.config.js）：读 GitHub Actions 注入的 `GITHUB_REPOSITORY` 推导子路径，仓库改名自动跟随；本地无该变量时回退为空（dev/build 不受影响），其他平台可用 `BASE_PATH` 覆盖
+- 本地验证部署产物：`$env:GITHUB_REPOSITORY='owner/repo'; npm run build` 后检查 `out/index.html` 资源引用带 `/repo/_next/...` 前缀
+- LLM Key 由各访问者自行配置（存各自浏览器 localStorage，按 origin 隔离），站点不内置共享 Key
+- 首次启用需在仓库 Settings → Pages → Source 选 **GitHub Actions**
+
 ## 开发工作流
 
 1. **先探索**：改动 Node/Session/Entry 数据 → 读 [ARCHITECTURE.md](agents/ARCHITECTURE.md)；新增交互 → 核对 [CONVENTIONS.md](agents/CONVENTIONS.md)
