@@ -9,7 +9,6 @@ import { cn } from "@/lib/utils";
 interface TermTextProps {
   content: string;
   onTermDoubleClick?: (term: string) => void;
-  onTermContextMenu?: (e: React.MouseEvent, term: string) => void;
   onTermHover?: (e: React.MouseEvent, term: string) => void;
   onTermLeave?: () => void;
   onFileLink?: (filename: string) => void;
@@ -19,7 +18,6 @@ interface TermTextProps {
 export const TermText = memo(function TermText({
   content,
   onTermDoubleClick,
-  onTermContextMenu,
   onTermHover,
   onTermLeave,
   onFileLink,
@@ -29,13 +27,12 @@ export const TermText = memo(function TermText({
   const encoded = termList.length ? encodeWithTermList(content, termList) : encodeTerms(content);
 
   return (
-    <span className={cn("text-sm leading-relaxed", className)}>
+    <span className={cn("text-base", className, "leading-[1.8]")}>
       <MarkdownRenderer
         content={encoded}
         inline
         onFileLink={onFileLink}
         onTermDoubleClick={onTermDoubleClick}
-        onTermContextMenu={onTermContextMenu}
         onTermHover={onTermHover}
         onTermLeave={onTermLeave}
       />

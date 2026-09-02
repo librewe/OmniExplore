@@ -46,6 +46,9 @@ const config: Config = {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      maxWidth: {
+        "3.5xl": "52rem",
+      },
       keyframes: {
         "pulse-dot": {
           "0%, 100%": { opacity: "0.4" },

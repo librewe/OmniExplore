@@ -38,8 +38,6 @@ export function SettingsPanel({
   const [apiKey, setApiKey] = useState(config?.api_key || "");
   const [baseUrl, setBaseUrl] = useState(config?.base_url || DEFAULT_LLM_CONFIG.base_url);
   const [model, setModel] = useState(config?.model || DEFAULT_LLM_CONFIG.model);
-  const [maxTokens, setMaxTokens] = useState(config?.max_tokens || DEFAULT_LLM_CONFIG.max_tokens);
-  const [temperature, setTemperature] = useState(config?.temperature || DEFAULT_LLM_CONFIG.temperature);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [saved, setSaved] = useState(false);
@@ -71,23 +69,21 @@ export function SettingsPanel({
       api_key: apiKey,
       base_url: baseUrl,
       model,
-      max_tokens: maxTokens,
-      temperature,
     };
     setConfig(cfg);
     localStorage.setItem("llm_config", JSON.stringify(cfg));
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
-  }, [apiKey, baseUrl, model, maxTokens, temperature, setConfig]);
+  }, [apiKey, baseUrl, model, setConfig]);
 
   const handleTest = useCallback(async () => {
     setTesting(true);
     setTestResult(null);
-    const cfg: LLMConfig = { api_key: apiKey, base_url: baseUrl, model, max_tokens: maxTokens, temperature };
+    const cfg: LLMConfig = { api_key: apiKey, base_url: baseUrl, model };
     const result = await testConnection(cfg);
     setTestResult(result);
     setTesting(false);
-  }, [apiKey, baseUrl, model, maxTokens, temperature]);
+  }, [apiKey, baseUrl, model]);
 
   useEffect(() => { setPresetOverrides(loadCustomPresetPrompts()); }, [open]);
 
@@ -181,29 +177,6 @@ export function SettingsPanel({
                     placeholder="gpt-4o"
                     className="mt-1"
                   />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm font-medium">Max Tokens</label>
-                    <Input
-                      type="number"
-                      value={maxTokens}
-                      onChange={(e) => setMaxTokens(Number(e.target.value))}
-                      className="mt-1"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium">Temperature</label>
-                    <Input
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      max="2"
-                      value={temperature}
-                      onChange={(e) => setTemperature(Number(e.target.value))}
-                      className="mt-1"
-                    />
-                  </div>
                 </div>
 
                 {testResult && (

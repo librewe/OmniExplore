@@ -20,6 +20,12 @@ function encodeFreeTerms(text: string, termList: string[]): string {
   for (const m of text.matchAll(mdLinkRegex)) {
     protectedRegions.push({ start: m.index!, end: m.index! + m[0].length });
   }
+  // 数学公式（$...$ / $$...$$ / \(...\) / \[...\]）与代码（`code` / ```fence```）内部不做术语匹配——
+  // 否则注入的私有区占位符会破坏 KaTeX 解析或代码原文；\(...\)/\[...\] 为 LaTeX 标准定界，
+  // 渲染前由 MarkdownRenderer.normalizeMathDelimiters 归一化，注入阶段必须先保护
+  for (const m of text.matchAll(/\$\$[^]*?\$\$|\$[^$\n]+\$|\\\([^]*?\\\)|\\\[[^]*?\\\]|```[^]*?```|`[^`\n]+`/g)) {
+    protectedRegions.push({ start: m.index!, end: m.index! + m[0].length });
+  }
 
   function isProtected(idx: number): boolean {
     return protectedRegions.some((r) => idx >= r.start && idx < r.end);

@@ -11,7 +11,6 @@ import { TERM_EXPLICIT_START, TERM_EXPLICIT_END, TERM_FREE_START, TERM_FREE_END 
 
 export interface TermHandlers {
   onTermDoubleClick?: (term: string) => void;
-  onTermContextMenu?: (e: React.MouseEvent, term: string) => void;
   onTermHover?: (e: React.MouseEvent, term: string) => void;
   onTermLeave?: () => void;
 }
@@ -51,7 +50,6 @@ function decodeSegment(text: string, handlers: TermHandlers, isCode: boolean): R
           className="term-underline"
           onDoubleClick={(e) => { e.stopPropagation(); handlers.onTermDoubleClick?.(term); }}
           onClick={(e) => { if (e.ctrlKey || e.metaKey) { e.stopPropagation(); handlers.onTermDoubleClick?.(term); } }}
-          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); handlers.onTermContextMenu?.(e, term); }}
           onMouseEnter={(e) => handlers.onTermHover?.(e, term)}
           onMouseLeave={() => handlers.onTermLeave?.()}
         >
@@ -84,26 +82,42 @@ function decorateChildren(children: React.ReactNode, handlers: TermHandlers, isC
   return children;
 }
 
+/**
+ * 把 LaTeX 标准定界符归一化为 remark-math 支持的格式：
+ * `\[...\]`（显示公式）→ `$$...$$`；`\(...\)`（行内公式）→ `$...$`。
+ * remark-math 默认只识别 `$`/`$$`，而主流 LLM 常输出 `\[...\]`/`\(...\)`，不做归一化会原样显示。
+ * 仅匹配 `\` 前缀的方/圆括号，避免误伤普通括号与引用标记。
+ */
+function normalizeMathDelimiters(content: string): string {
+  if (!content.includes("\\[") && !content.includes("\\(")) return content;
+  return content
+    .replace(/\\\[([\s\S]*?)\\\]/g, "$$$$$1$$$$")
+    .replace(/\\\(([\s\S]*?)\\\)/g, "$$$1$");
+}
+
 export function MarkdownRenderer({
   content, className, inline, onFileLink,
-  onTermDoubleClick, onTermContextMenu, onTermHover, onTermLeave,
+  onTermDoubleClick, onTermHover, onTermLeave,
 }: MarkdownRendererProps) {
   const handlers = useMemo<TermHandlers>(
-    () => ({ onTermDoubleClick, onTermContextMenu, onTermHover, onTermLeave }),
-    [onTermDoubleClick, onTermContextMenu, onTermHover, onTermLeave]
+    () => ({ onTermDoubleClick, onTermHover, onTermLeave }),
+    [onTermDoubleClick, onTermHover, onTermLeave]
   );
 
   const comps = useMemo(() => {
-    const leaf = (tag: string, cls?: string): React.ComponentType<Record<string, unknown>> =>
-      ({ children, ...props }: Record<string, unknown>) =>
+    const leaf = (tag: string, cls?: string): React.ComponentType<Record<string, unknown>> => {
+      const Comp = ({ children, ...props }: Record<string, unknown>) =>
         React.createElement(tag, { className: cls, ...props }, decorateChildren(children as React.ReactNode, handlers, false));
+      Comp.displayName = `Markdown-${tag}`;
+      return Comp;
+    };
 
     return {
       code: ({ className: codeClass, children, ...props }: Record<string, unknown>) => {
         const isInline = !codeClass;
         return React.createElement(
           "code",
-          { className: isInline ? "bg-muted rounded px-1 py-0.5 text-xs" : codeClass, ...props },
+          { className: isInline ? "bg-muted rounded px-1 py-0.5 text-[13px]" : codeClass, ...props },
           decorateChildren(children as React.ReactNode, handlers, true)
         );
       },
@@ -111,12 +125,12 @@ export function MarkdownRenderer({
         inline
           ? React.createElement(InlineP, props, decorateChildren(children as React.ReactNode, handlers, false))
           : React.createElement(BlockP, props, decorateChildren(children as React.ReactNode, handlers, false)),
-      h1: leaf("h1", "text-lg font-bold mt-3 mb-1"),
-      h2: leaf("h2", "text-base font-bold mt-2 mb-1"),
-      h3: leaf("h3", "text-sm font-bold mt-2 mb-0.5"),
-      h4: leaf("h4", "text-sm font-bold mt-2 mb-0.5"),
-      h5: leaf("h5", "text-sm font-bold mt-1 mb-0.5"),
-      h6: leaf("h6", "text-xs font-bold mt-1 mb-0.5"),
+      h1: leaf("h1", "text-xl font-bold mt-3 mb-1"),
+      h2: leaf("h2", "text-lg font-bold mt-2 mb-1"),
+      h3: leaf("h3", "text-[17px] font-bold mt-2 mb-0.5"),
+      h4: leaf("h4", "text-base font-bold mt-2 mb-0.5"),
+      h5: leaf("h5", "text-base font-bold mt-1 mb-0.5"),
+      h6: leaf("h6", "text-sm font-bold mt-1 mb-0.5"),
       li: leaf("li"),
       ul: leaf("ul", "list-disc pl-5 my-1"),
       ol: leaf("ol", "list-decimal pl-5 my-1"),
@@ -142,7 +156,7 @@ export function MarkdownRenderer({
         React.createElement(
           "div",
           { className: "overflow-x-auto my-2" },
-          React.createElement("table", { className: "min-w-full border-collapse border border-border text-xs", ...props },
+          React.createElement("table", { className: "min-w-full border-collapse border border-border text-sm", ...props },
             decorateChildren(children as React.ReactNode, handlers, false))
         ),
       thead: leaf("thead", "bg-muted/50"),
@@ -162,7 +176,7 @@ export function MarkdownRenderer({
         rehypePlugins={[rehypeKatex]}
         components={comps as unknown as Record<string, React.ComponentType<Record<string, unknown>>>}
       >
-        {content}
+        {normalizeMathDelimiters(content)}
       </ReactMarkdown>
     </span>
   );

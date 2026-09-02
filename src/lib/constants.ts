@@ -19,8 +19,6 @@ export const DEFAULT_SELECTION_TEMPLATES = [
 export const DEFAULT_LLM_CONFIG = {
   base_url: "https://api.openai.com/v1",
   model: "gpt-4o",
-  max_tokens: 1024,
-  temperature: 0.7,
 };
 
 export const STREAMING_TIMEOUT_MS = 30_000;

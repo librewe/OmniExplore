@@ -10,7 +10,7 @@ interface PDFViewerProps {
   data: string;
   fileName: string;
   onClose: () => void;
-  onSelectionContextMenu?: (e: MouseEvent, selectedText: string) => void;
+  onSelectionContextMenu?: (selectedText: string, rect: { left: number; bottom: number }) => void;
   onCreateBoundNode?: () => void;
   boundNodeExists?: boolean;
 }
@@ -113,18 +113,21 @@ export function PDFViewer({ data, fileName, onClose, onSelectionContextMenu, onC
         setScale((s) => Math.max(0.5, Math.min(3, s - e.deltaY * 0.001)));
       }
     };
-    const handleCtx = (e: MouseEvent) => {
+    const handleMouseUp = () => {
       const sel = window.getSelection()?.toString().trim();
       if (sel) {
-        e.preventDefault();
-        onSelectionContextMenu?.(e, sel);
+        const range = window.getSelection()?.getRangeAt(0);
+        const rect = range?.getBoundingClientRect();
+        if (rect && (rect.width > 0 || rect.height > 0)) {
+          onSelectionContextMenu?.(sel, { left: rect.left, bottom: rect.bottom });
+        }
       }
     };
     el.addEventListener("wheel", handleWheel, { passive: false });
-    el.addEventListener("contextmenu", handleCtx);
+    el.addEventListener("mouseup", handleMouseUp);
     return () => {
       el.removeEventListener("wheel", handleWheel);
-      el.removeEventListener("contextmenu", handleCtx);
+      el.removeEventListener("mouseup", handleMouseUp);
     };
   }, [onSelectionContextMenu]);
 

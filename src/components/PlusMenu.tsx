@@ -1,7 +1,7 @@
 "use client";
 
 import { Plus } from "lucide-react";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import type { PlusMenuItem } from "@/types";
 
@@ -16,6 +16,16 @@ export function PlusMenu({ items, onSelect, onCreateEmpty }: PlusMenuProps) {
   const [anchor, setAnchor] = useState<{ left: number; top: number } | null>(null);
   const ref = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const closeTimerRef = useRef<number | null>(null);
+
+  const scheduleClose = useCallback(() => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = window.setTimeout(() => setOpen(false), 120);
+  }, []);
+
+  const cancelClose = useCallback(() => {
+    if (closeTimerRef.current) window.clearTimeout(closeTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -36,13 +46,27 @@ export function PlusMenu({ items, onSelect, onCreateEmpty }: PlusMenuProps) {
     };
   }, [open]);
 
-  const toggle = (e: React.MouseEvent) => {
+  const openMenu = (e: React.MouseEvent) => {
     e.stopPropagation();
+    cancelClose();
     if (!open && ref.current) {
       const rect = ref.current.getBoundingClientRect();
       setAnchor({ left: rect.left, top: rect.bottom });
     }
-    setOpen(!open);
+    setOpen(true);
+  };
+
+  const toggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    if (ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      setAnchor({ left: rect.left, top: rect.bottom });
+    }
+    setOpen(true);
   };
 
   return (
@@ -50,6 +74,8 @@ export function PlusMenu({ items, onSelect, onCreateEmpty }: PlusMenuProps) {
       <button
         ref={ref}
         onClick={toggle}
+        onMouseEnter={openMenu}
+        onMouseLeave={scheduleClose}
         className="inline-flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
       >
         <Plus className="w-3.5 h-3.5" />
@@ -57,6 +83,8 @@ export function PlusMenu({ items, onSelect, onCreateEmpty }: PlusMenuProps) {
       {open && anchor && createPortal(
         <div
           ref={menuRef}
+          onMouseEnter={cancelClose}
+          onMouseLeave={scheduleClose}
           className="fixed z-[100] mt-1 min-w-[200px] rounded-md border bg-popover p-1 text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95 origin-top-left"
           style={{ left: Math.min(anchor.left, window.innerWidth - 220), top: anchor.top }}
         >

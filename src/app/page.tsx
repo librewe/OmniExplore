@@ -8,7 +8,7 @@ import { InputBar } from "@/components/InputBar";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { PreviewPanel } from "@/components/PreviewPanel";
 import { ThemeMenu } from "@/components/ThemeMenu";
-import { GuideMapCanvas, buildBreadcrumbItems, findNodePath } from "@/components/GuideMapCanvas";
+import { GuideMapCanvas, buildBreadcrumbItems, getNodeByPath } from "@/components/GuideMapCanvas";
 import { NodeLibrary } from "@/components/NodeLibrary";
 import { FilesList } from "@/components/FilesList";
 import { PDFViewer } from "@/components/PDFViewer";
@@ -18,10 +18,12 @@ import { HoverPreview } from "@/components/HoverPreview";
 import { initializeConfig, useConfigStore } from "@/store/configStore";
 import { getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG, getAllFiles, putFile, deleteFile, getAllNodes, putNode, deleteNode, migrateData } from "@/services/cache";
 import { streamLLMChat, LLMError } from "@/services/llm";
+import { buildMessages, buildForkChain, isSummaryEntry } from "@/services/contextBuilder";
 import { cn } from "@/lib/utils";
-import { Layers, ChevronRight, Search, Plus, Pencil, Trash2, Copy, GitBranch, ArrowLeft } from "lucide-react";
+import { Layers, ChevronRight, Search, Plus, Pencil, Trash2, Copy, GitBranch, ArrowLeft, List } from "lucide-react";
 import { DEFAULT_PLUS_TEMPLATES, DEFAULT_SELECTION_TEMPLATES } from "@/lib/constants";
-import { defaultPrompt, intuitionPrompt, definitionPrompt, applicationPrompt, motivationPrompt, loadCustomPresetPrompts } from "@/services/prompts";
+import { defaultPrompt, intuitionPrompt, definitionPrompt, applicationPrompt, motivationPrompt, loadCustomPresetPrompts, summaryPrompt, DEFAULT_SYSTEM_PROMPT } from "@/services/prompts";
+import { segmentRange, applyForkSplit, findLastSummaryFor } from "@/services/segments";
 import type {
   WorkGroup,
   GuideMapNode,
@@ -30,6 +32,7 @@ import type {
   Node,
 } from "@/types";
 import { NodeView } from "@/components/NodeView";
+import { SessionTOC } from "@/components/SessionTOC";
 import { nodeReducer, getInitialNodeState, createNode, createSession, createEntry } from "@/store/nodeStore";
 import type { Session, Entry } from "@/types";
 
@@ -81,7 +84,7 @@ function GuideBreadcrumb({
       <button
         onClick={onRoot}
         className={cn(
-          "text-xs px-1 py-0.5 rounded transition-colors ml-2 max-w-[120px] truncate shrink-0",
+          "text-sm px-1 py-0.5 rounded transition-colors ml-2 max-w-[120px] truncate shrink-0",
           path.length === 0 ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"
         )}
       >簇</button>
@@ -91,7 +94,7 @@ function GuideBreadcrumb({
           <button
             onClick={() => onNavigate(item.path)}
             className={cn(
-              "text-xs px-1 py-0.5 rounded transition-colors max-w-[120px] truncate",
+              "text-sm px-1 py-0.5 rounded transition-colors max-w-[120px] truncate",
               i === items.length - 1 ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"
             )}
           >{item.label}</button>
@@ -104,13 +107,15 @@ function GuideBreadcrumb({
 export default function Home() {
   type NavEntry =
     | { type: "tree"; term: string }
-    | { type: "guideMap"; pathStr: string; focusPath: number[] };
+    | { type: "guideMap"; pathStr: string; focusPath: number[] }
+    | { type: "session"; sessionId: string; title: string };
 
   function navEntryEq(a: NavEntry, b: NavEntry): boolean {
     if (!a || !b) return false;
     if (a.type !== b.type) return false;
     if (a.type === "tree" && b.type === "tree") return a.term === b.term;
     if (a.type === "guideMap" && b.type === "guideMap") return a.pathStr === b.pathStr;
+    if (a.type === "session" && b.type === "session") return a.sessionId === b.sessionId;
     return false;
   }
 
@@ -142,6 +147,46 @@ export default function Home() {
     }
     return undefined;
   }, []);
+
+  // 任意深度 Session id → 所属根 Session（内层工作区只渲染根 Session，子分支定位须上溯）
+  const findRootSessionOf = useCallback((id: string): Session | undefined => {
+    const node = nodeRef.current;
+    if (!node) return undefined;
+    function search(session: Session): Session | null {
+      if (session.id === id) return session;
+      for (const e of session.entries) {
+        for (const c of e.children) {
+          const found = search(c);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+    for (const s of node.sessions) {
+      const found = search(s);
+      if (found) return s; // 找到目标即返回其根祖先
+    }
+    return undefined;
+  }, []);
+
+  // 展开从根 Session 到目标 Session 的所有父 entry（内层进入子分支后确保其可见）
+  const expandPathToSession = useCallback((targetId: string): void => {
+    const node = nodeRef.current;
+    if (!node) return;
+    function walk(session: Session): boolean {
+      if (session.id === targetId) return true;
+      for (const e of session.entries) {
+        for (const c of e.children) {
+          if (walk(c)) {
+            e.expanded = true;
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+    for (const s of node.sessions) walk(s);
+  }, []);
   const [contextTarget, setContextTarget] = useState<{ type: "node"; id: string } | { type: "session"; id: string } | { type: "entry"; entry: Entry } | null>(null);
   const [contextPos, setContextPos] = useState({ x: 0, y: 0 });
   const closeContext = useCallback(() => { setContextTarget(null); contextSessionRef.current = null; contextNodeRef.current = null; }, []);
@@ -162,6 +207,9 @@ export default function Home() {
   const [recentInputs, setRecentInputs] = useState<string[]>([]);
 
   const [showGuideMap, setShowGuideMap] = useState(false);
+  /** 外层目录视图（showTOC=true 显示 SessionTOC）；内层 = 单一根 Session 工作区（innerSessionId 指定渲染哪个根 Session） */
+  const [showTOC, setShowTOC] = useState(false);
+  const [innerSessionId, setInnerSessionId] = useState<string | null>(null);
   const [fillValue, setFillValue] = useState<string>("");
   const [editingEntry, setEditingEntry] = useState<Entry | null>(null);
   const [navHistory, setNavHistory] = useState<NavEntry[]>([]);
@@ -342,13 +390,21 @@ export default function Home() {
     });
   }, []);
 
+  const removeRecentInput = useCallback((text: string) => {
+    setRecentInputs((prev) => {
+      const next = prev.filter((t) => t !== text);
+      localStorage.setItem("input_history", JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
   // 子 Session 加号菜单 = Default（简单介绍${node}）+ 用户自定义项
   const subPlusMenuItems = useMemo<PlusMenuItem[]>(
     () => [{ id: "sub_default", label: "Default", prompt: "简单介绍${node}" }, ...plusMenuItems],
     [plusMenuItems]
   );
 
-  const ensureGuideMap = useCallback(async (title?: string) => {
+  const ensureGuideMap = useCallback(async (title?: string, nodeId?: string) => {
     if (!activeGroupId) return;
     const group = workGroups.find((g) => g.id === activeGroupId);
     if (!group) return;
@@ -359,20 +415,20 @@ export default function Home() {
       setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
     }
     const currentTitle = title ?? nodeState.node?.title;
+    const currentId = nodeId ?? nodeState.node?.id;
     if (currentTitle && group.guide_map) {
-      const lower = currentTitle.toLowerCase();
-      // 存在性检查递归整棵导图（含嵌套组内节点），避免把组内已有节点重复添加到根层
-      const existsInTree = (n: GuideMapNode): boolean =>
-        (!!n.term && n.term.toLowerCase() === lower) || n.children.some(existsInTree);
-      const exists = group.guide_map.children.some(existsInTree);
+      // 存在性检查按 nodeId：导图中已有绑定此 Node 的叶子则不重复添加；同名自由节点不影响绑定
+      const existsById = (n: GuideMapNode): boolean =>
+        (!!n.nodeId && n.nodeId === currentId) || n.children.some(existsById);
+      const exists = group.guide_map.children.some(existsById);
       if (!exists) {
-        group.guide_map = { ...group.guide_map, children: [...group.guide_map.children, { term: currentTitle, children: [] }] };
+        group.guide_map = { ...group.guide_map, children: [...group.guide_map.children, { term: currentTitle, children: [], nodeId: currentId }] };
         group.updated_at = Date.now();
         putWorkGroup(group);
         setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
       }
     }
-  }, [activeGroupId, workGroups, nodeState.node?.title]);
+  }, [activeGroupId, workGroups, nodeState.node?.title, nodeState.node?.id]);
 
   const buildNodePreview = useCallback((node: Node): string => {
     const lines: string[] = [];
@@ -389,8 +445,18 @@ export default function Home() {
     if (existing) {
       targetSessionIdRef.current = null;
       dispatchNode({ type: "SET_NODE", node: existing });
-      dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: existing.id, title: existing.title });
+      // 默认选中首个根 Session（追加目标一开始就明确；无根 Session 时回落 Node 级）
+      const first = existing.sessions[0];
+      if (first) {
+        targetSessionIdRef.current = first.id;
+        dispatchNode({ type: "SET_SELECTED_SESSION", session: first });
+        dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: first.id, title: first.title });
+      } else {
+        dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: existing.id, title: existing.title });
+      }
       setShowGuideMap(false);
+      setShowTOC(true);
+      setInnerSessionId(null);
       setPreviewTitle(existing.title);
       // Push nav history（导航触发 silent=true 时不推，避免污染历史）
       if (!silent) {
@@ -413,6 +479,8 @@ export default function Home() {
     setNodeList((prev) => [...prev.filter(n => n.id !== node.id), node]);
     addRecentInput(title);
     setShowGuideMap(false);
+    setShowTOC(true);
+    setInnerSessionId(null);
     setPreviewTitle(node.title);
     setPreviewContent(null);
     // Push nav history（导航触发 silent=true 时不推）
@@ -426,7 +494,7 @@ export default function Home() {
       setNavIndex((prev) => prev + 1);
     }
     // Add to guide map
-    ensureGuideMap(title.trim());
+    ensureGuideMap(title.trim(), node.id);
     // Set preview content from root sessions
     setPreviewContent(buildNodePreview(node));
   }, [nodeList, addRecentInput, navIndex, ensureGuideMap, activeGroupId, buildNodePreview]);
@@ -438,13 +506,17 @@ export default function Home() {
       const abort = new AbortController();
       streamingAbortRef.current = abort;
       dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "loading" });
+      console.log(`[OmniExplore] LLM request (${messages.length} msgs):`, JSON.stringify(messages, null, 2));
       try {
         let accumulated = "";
+        let accumulatedReasoning = "";
         const generator = streamLLMChat(config, messages);
         dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "streaming" });
         for await (const chunk of generator) {
           if (abort.signal.aborted) break;
-          accumulated += chunk;
+          if (chunk.content) accumulated += chunk.content;
+          if (chunk.reasoning) accumulatedReasoning += chunk.reasoning;
+          if (accumulatedReasoning) entry.reasoning = accumulatedReasoning;
           dispatchNode({ type: "SET_STREAMING_CONTENT", entry, content: accumulated });
         }
         // abort（新流打断旧流）也置 done，避免旧 entry 图标永远停留"加载中"
@@ -463,10 +535,109 @@ export default function Home() {
     []
   );
 
+  // 段闭合摘要：fork 时 fire-and-forget 生成 summary entry，置于 fork entry 之后。
+  const summarizeSegment = useCallback(
+    async (session: Session, forkEntry: Entry, segment: { start: number; end: number }, force = false): Promise<void> => {
+      const existing = findLastSummaryFor(session, forkEntry);
+      // 已有 summary（或正在生成）则跳过，避免重复生成；force（用户手动重新生成）时复用已有 summary entry
+      if (!force && existing) return;
+
+      const forkIdx = session.entries.indexOf(forkEntry);
+      if (forkIdx === -1) return;
+
+      let summaryEntry: Entry;
+      if (force && existing) {
+        // 重新生成：复用已有 summary entry（不 splice 第二个），清空内容并重置状态
+        summaryEntry = existing;
+        summaryEntry.userInput = "";
+        summaryEntry.summaryEdited = false;
+        summaryEntry.summaryStatus = "loading";
+        summaryEntry.expanded = true;
+        session.updated_at = Date.now();
+        dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
+        await putNode(nodeRef.current!);
+      } else {
+        summaryEntry = createEntry("summary", "");
+        summaryEntry.summaryStatus = "loading";
+        summaryEntry.expanded = true;
+        // summary 紧跟段尾 fork entry（数据层定位）；渲染层再将其置于子 Session 之前（一个段多个 fork 共用）
+        session.entries.splice(forkIdx + 1, 0, summaryEntry);
+        session.updated_at = Date.now();
+        dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
+        await putNode(nodeRef.current!);
+      }
+
+      if (!config || !isConfigured) {
+        // 未配置 LLM：仍闭合段（置 error 占位），保证 TOC/内层可见"未生成"标记
+        summaryEntry.summaryStatus = "error";
+        summaryEntry.errorMessage = "未配置 LLM，无法生成摘要";
+        session.updated_at = Date.now();
+        dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
+        await putNode(nodeRef.current!);
+        return;
+      }
+
+      const messages: { role: string; content: string }[] = [{ role: "system", content: DEFAULT_SYSTEM_PROMPT }];
+      // 祖先链上溯到根/摘要种子（summary 总结也需完整上下文，与普通问答一致）
+      buildForkChain(session, (id) => findSessionInTree(id), messages);
+      for (let i = segment.start; i <= segment.end; i++) {
+        const e = session.entries[i];
+        if (!e || e.type === "summary") continue;
+        if (e.type === "note") {
+          messages.push({ role: "user", content: `[笔记] ${e.userInput}` });
+        } else {
+          messages.push({ role: "user", content: e.userInput });
+          if (e.assistantOutput) messages.push({ role: "assistant", content: e.assistantOutput });
+        }
+      }
+      // 总结指令作为最后一条 user 消息，保持与普通问答一致的 system 前缀以命中上下文缓存
+      messages.push({ role: "user", content: summaryPrompt() });
+
+      try {
+        console.log(`[OmniExplore] LLM summary request (${messages.length} msgs):`, JSON.stringify(messages, null, 2));
+        dispatchNode({ type: "SET_ENTRY_SUMMARY_STATUS", entry: summaryEntry, status: "streaming" });
+        let accumulated = "";
+        for await (const chunk of streamLLMChat(config, messages)) {
+          if (chunk.content) accumulated += chunk.content;
+          dispatchNode({ type: "SET_ENTRY_SUMMARY", entry: summaryEntry, content: accumulated });
+        }
+        dispatchNode({ type: "SET_ENTRY_SUMMARY_STATUS", entry: summaryEntry, status: "done" });
+        session.updated_at = Date.now();
+        await putNode(nodeRef.current!);
+        dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
+      } catch (err) {
+        console.error("[OmniExplore] summary generation error:", err);
+        const message = err instanceof LLMError ? err.message : "摘要生成失败";
+        dispatchNode({ type: "SET_ENTRY_SUMMARY_STATUS", entry: summaryEntry, status: "error", errorMessage: message });
+        session.updated_at = Date.now();
+        await putNode(nodeRef.current!);
+        dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
+      }
+    },
+    [config, isConfigured, findSessionInTree]
+  );
+
+  // 闭合段：清掉旧 summary（若本次 fork 切分了更靠后的已闭合段）并调度摘要生成。
+  // 必须在 fork entry 尚未获得 children 时调用（applyForkSplit 依赖 isForkEntry 判空）。
+  // fork 源是 summary entry 本身时不闭合段（从摘要派生的会话只继承摘要种子，不产生 summary-of-summary）。
+  const closeSegmentAndSummarize = useCallback(
+    (session: Session, forkEntry: Entry) => {
+      if (isSummaryEntry(forkEntry)) return;
+      const stale = applyForkSplit(session, forkEntry);
+      if (stale && !stale.summaryEdited) {
+        session.entries = session.entries.filter((e) => e !== stale);
+      }
+      const range = segmentRange(session, forkEntry);
+      if (!range) return;
+      void summarizeSegment(session, forkEntry, range);
+    },
+    [summarizeSegment]
+  );
+
   const createRootSession = useCallback(async (title: string): Promise<Session | null> => {
     const node = nodeRef.current;
     if (!node) return null;
-    const session = createSession(title || "未命名", node.groupId);
+    const session = createSession(title || "新分支", node.groupId);
     node.sessions = [...node.sessions, session];
     node.updated_at = Date.now();
     await putNode(node);
@@ -477,7 +648,7 @@ export default function Home() {
   }, []);
 
   const handleCreateRootSession = useCallback(async () => {
-    const session = await createRootSession("未命名");
+    const session = await createRootSession("新分支");
     if (session) {
       renameTargetRef.current = { type: "session", session };
       setRenamingNodeId(session.id);
@@ -492,9 +663,14 @@ export default function Home() {
       // 未选中根 Session：自动新建根 Session（标题取输入截断），输入视为追加到 node
       const node = nodeRef.current;
       if (!node) return;
-      const title = text.split("\n")[0].slice(0, 30) || "未命名";
+      const title = text.split("\n")[0].slice(0, 30) || "新分支";
       s = await createRootSession(title);
       if (!s) return;
+      // 外层 TOC 模式：新会话创建后自动进入其内层工作区，直接查看流式回答
+      if (showTOC) {
+        setShowTOC(false);
+        setInnerSessionId(s.id);
+      }
     }
     setFillValue("");
     const systemPrompt = presetSystemRef.current ?? "你是一个有帮助的人工智能助手。";
@@ -507,49 +683,7 @@ export default function Home() {
     dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
     await putNode(nodeRef.current!);
     if (config && isConfigured) {
-      const messages: { role: string; content: string }[] = [
-        { role: "system", content: systemPrompt },
-      ];
-      if (s.forkBoundary) {
-        // Walk up parentSessionId chain; for each ancestor, find which entry was forked from
-        type AncestorEntry = { session: Session; upToIndex: number };
-        const chain: AncestorEntry[] = [];
-        let cursor: Session | undefined = s;
-        while (cursor?.parentSessionId) {
-          const parent = findSessionInTree(cursor.parentSessionId);
-          if (!parent) break;
-          const forkedIdx = parent.entries.findIndex(e =>
-            e.children.some(c => c.id === cursor!.id)
-          );
-          chain.unshift({ session: parent, upToIndex: forkedIdx >= 0 ? forkedIdx : parent.entries.length - 1 });
-          cursor = parent;
-        }
-        for (const { session: ancestor, upToIndex } of chain) {
-          if (ancestor.forkBoundary) {
-            messages.push({ role: "system", content: ancestor.forkBoundary });
-          }
-          for (let i = 0; i <= upToIndex; i++) {
-            const pe = ancestor.entries[i];
-            if (pe.type === "qa" && pe.userInput) {
-              messages.push({ role: "user", content: pe.userInput });
-              if (pe.assistantOutput) messages.push({ role: "assistant", content: pe.assistantOutput });
-            } else if (pe.type === "note" && pe.userInput) {
-              messages.push({ role: "user", content: `[笔记] ${pe.userInput}` });
-            }
-          }
-        }
-        messages.push({ role: "system", content: s.forkBoundary });
-      }
-      for (const pe of s.entries.slice(0, -1)) {
-        if (pe.type === "qa" && pe.userInput) {
-          messages.push({ role: "user", content: pe.userInput });
-          if (pe.assistantOutput) messages.push({ role: "assistant", content: pe.assistantOutput });
-        } else if (pe.type === "note" && pe.userInput) {
-          messages.push({ role: "user", content: `[笔记] ${pe.userInput}` });
-        }
-      }
-      messages.push({ role: "user", content: text });
-      console.log("[OmniExplore] messages:", messages.map(m => `${m.role}: ${m.content.slice(0, 60)}`));
+      const messages = buildMessages(s, systemPrompt, text, (id) => findSessionInTree(id));
       await handleStreamEntry(entry, config, messages);
       s.updated_at = Date.now();
       await putNode(nodeRef.current!);
@@ -560,7 +694,7 @@ export default function Home() {
       dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
       await putNode(nodeRef.current!);
     }
-  }, [config, isConfigured, handleStreamEntry, findSessionInTree, createRootSession]);
+  }, [config, isConfigured, handleStreamEntry, findSessionInTree, createRootSession, showTOC]);
 
   const handleToggleEntryExpand = useCallback(async (session: Session, entry: Entry) => {
     entry.expanded = !entry.expanded;
@@ -569,9 +703,9 @@ export default function Home() {
     dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
   }, []);
 
-  const handleSelectEntry = useCallback((entry: Entry | null) => { dispatchNode({ type: "SET_SELECTED_ENTRY", entry }); }, []);
   const handleSelectSession = useCallback((session: Session | null) => {
     dispatchNode({ type: "SET_SELECTED_SESSION", session });
+    dispatchNode({ type: "SET_SELECTED_ENTRY", entry: null });
     if (session) {
       dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: session.id, title: session.title });
       targetSessionIdRef.current = session.id;
@@ -581,6 +715,87 @@ export default function Home() {
       if (node) dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: node.id, title: node.title });
     }
   }, []);
+
+  // 统一导航条目回放：tree → 聚焦落外层 TOC；session → 回内层该 Session；guideMap → 组合视图
+  const applyNavEntry = useCallback(
+    (entry: NavEntry) => {
+      if (entry.type === "tree") {
+        handleFocusNode(entry.term, true);
+      } else if (entry.type === "session") {
+        const s = findSessionInTree(entry.sessionId);
+        if (!s) return;
+        setShowGuideMap(false);
+        setShowTOC(false);
+        const root = findRootSessionOf(entry.sessionId);
+        expandPathToSession(entry.sessionId);
+        setInnerSessionId(root?.id ?? entry.sessionId);
+        handleSelectSession(s);
+      } else {
+        setShowGuideMap(true);
+        setGuideFocusPath(entry.focusPath);
+      }
+    },
+    [handleFocusNode, findSessionInTree, findRootSessionOf, expandPathToSession, handleSelectSession]
+  );
+
+  const handleTOCSelectSession = useCallback(
+    (sessionId: string, title: string) => {
+      const s = findSessionInTree(sessionId);
+      if (!s) return;
+      // 内层工作区只渲染根 Session：子 Session 点击时定位到所属根，并展开路径使其可见
+      const root = findRootSessionOf(sessionId);
+      const innerId = root?.id ?? sessionId;
+      expandPathToSession(sessionId);
+      handleSelectSession(s);
+      dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
+      setShowTOC(false);
+      setInnerSessionId(innerId);
+      const entry: NavEntry = { type: "session", sessionId: innerId, title: root?.title ?? title };
+      setNavHistory((prev) => {
+        const next = prev.slice(0, navIndex + 1);
+        if (next.length === 0 || !navEntryEq(next[next.length - 1], entry)) next.push(entry);
+        return next;
+      });
+      setNavIndex((prev) => prev + 1);
+    },
+    [findSessionInTree, findRootSessionOf, expandPathToSession, handleSelectSession, navIndex]
+  );
+
+  const handleTOCEnterSummary = useCallback(
+    (sessionId: string, entry: Entry) => {
+      const s = findSessionInTree(sessionId);
+      if (!s) return;
+      const root = findRootSessionOf(sessionId);
+      const innerId = root?.id ?? sessionId;
+      expandPathToSession(sessionId);
+      handleSelectSession(s);
+      entry.expanded = true;
+      dispatchNode({ type: "SET_SELECTED_ENTRY", entry });
+      dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
+      setShowTOC(false);
+      setInnerSessionId(innerId);
+      const nav: NavEntry = { type: "session", sessionId: innerId, title: root?.title ?? s.title };
+      setNavHistory((prev) => {
+        const next = prev.slice(0, navIndex + 1);
+        if (next.length === 0 || !navEntryEq(next[next.length - 1], nav)) next.push(nav);
+        return next;
+      });
+      setNavIndex((prev) => prev + 1);
+    },
+    [findSessionInTree, findRootSessionOf, expandPathToSession, handleSelectSession, navIndex]
+  );
+
+  // 进入内层时滚动到选中目标（展开路径是异步渲染，rAF 确保 DOM 就绪；仅 innerSessionId 变化触发一次）
+  useEffect(() => {
+    if (!innerSessionId) return;
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = document.querySelector(".tree-node-selected");
+        el?.scrollIntoView({ block: "center", behavior: "auto" });
+      });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [innerSessionId]);
 
   const handleCreateEmptyEntry = useCallback(async () => {
     const s = findSessionInTree(targetSessionIdRef.current ?? "") || nodeRef.current?.sessions[0];
@@ -602,6 +817,7 @@ export default function Home() {
   }, []);
 
   const handleForkEntry = useCallback(async (session: Session, entry: Entry) => {
+    closeSegmentAndSummarize(session, entry);
     const forkNum = entry.children.length + 1;
     const child = createSession(`${session.title} (分支#${forkNum})`, session.groupId);
     child.parentSessionId = session.id;
@@ -611,7 +827,8 @@ export default function Home() {
     session.updated_at = Date.now();
     dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
     await putNode(nodeRef.current!);
-  }, []);
+    handleSelectSession(child);
+  }, [closeSegmentAndSummarize, handleSelectSession]);
 
   const handleSessionContextMenu = useCallback((e: React.MouseEvent, session: Session) => { e.preventDefault(); contextSessionRef.current = session; setContextTarget({ type: "session", id: session.id }); setContextPos({ x: e.clientX, y: e.clientY }); }, []);
   const handleNodeContextMenu = useCallback((e: React.MouseEvent, node: Node) => { e.preventDefault(); contextNodeRef.current = node; setContextTarget({ type: "node", id: node.id }); setContextPos({ x: e.clientX, y: e.clientY }); }, []);
@@ -620,13 +837,13 @@ export default function Home() {
   const handleRenameSession = useCallback((session: Session) => { renameTargetRef.current = { type: "session", session }; setRenamingNodeId(session.id); }, []);
   const handleRenameNode = useCallback((node: Node) => { renameTargetRef.current = { type: "node", node }; setRenamingNodeId(node.id); }, []);
 
-  const removeFromGuideMap = useCallback((title: string) => {
-    if (!activeGroupId || !title) return;
+  const removeFromGuideMap = useCallback((nodeId: string) => {
+    if (!activeGroupId || !nodeId) return;
     const group = workGroups.find((g) => g.id === activeGroupId);
     if (!group?.guide_map) return;
     const removeFrom = (n: GuideMapNode): GuideMapNode => ({
       ...n,
-      children: n.children.filter((c) => c.term.toLowerCase() !== title.toLowerCase()).map(removeFrom),
+      children: n.children.filter((c) => c.nodeId !== nodeId).map(removeFrom),
     });
     const cleaned = removeFrom(group.guide_map);
     if (JSON.stringify(cleaned) !== JSON.stringify(group.guide_map)) {
@@ -645,9 +862,10 @@ export default function Home() {
       if (!n) return;
       await deleteNode(n.id);
       setNodeList(prev => prev.filter(x => x.id !== n.id));
-      removeFromGuideMap(n.title);
+      removeFromGuideMap(n.id);
       if (nodeState.node?.id === n.id) {
         dispatchNode({ type: "CLEAR_NODE" });
+        setInnerSessionId(null);
         setPreviewTitle(""); setPreviewContent(null);
       }
       closeContext();
@@ -694,13 +912,13 @@ export default function Home() {
     return false;
   }
 
-  const updateGuideMapTerm = useCallback((oldTerm: string, newTerm: string) => {
-    if (!activeGroupId || !oldTerm || oldTerm === newTerm) return;
+  const updateGuideMapTerm = useCallback((nodeId: string, newTerm: string) => {
+    if (!activeGroupId || !nodeId || !newTerm) return;
     const group = workGroups.find((g) => g.id === activeGroupId);
     if (!group?.guide_map) return;
     const updateTerm = (n: GuideMapNode): GuideMapNode => ({
       ...n,
-      term: n.term.toLowerCase() === oldTerm.toLowerCase() ? newTerm : n.term,
+      term: n.nodeId === nodeId ? newTerm : n.term,
       children: n.children.map(updateTerm),
     });
     const next = updateTerm(group.guide_map);
@@ -728,7 +946,7 @@ export default function Home() {
       if (nodeState.node?.id === n.id) {
         dispatchNode({ type: "RENAME_NODE", title: newTitle });
         dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: n.id, title: newTitle });
-        updateGuideMapTerm(oldTitle, newTitle);
+        updateGuideMapTerm(n.id, newTitle);
         if (pdfBoundNodeRef.current === oldTitle) {
           setPdfBoundNode(newTitle);
           pdfBindingsRef.current.forEach((v, k) => { if (v === oldTitle) pdfBindingsRef.current.set(k, newTitle); });
@@ -769,6 +987,20 @@ export default function Home() {
     return undefined;
   }, []);
 
+  // 点 entry：选中该 entry 并同步追加目标到所属 Session（selectedEntry/selectedSession 独立共存，
+  // 渲染层 entry 优先高亮、session 标题抑制高亮 → 视觉唯一 + 提示线跟随追加目标）
+  const handleSelectEntry = useCallback((entry: Entry | null) => {
+    dispatchNode({ type: "SET_SELECTED_ENTRY", entry });
+    if (entry) {
+      const host = findSessionForEntry(entry);
+      if (host) {
+        dispatchNode({ type: "SET_SELECTED_SESSION", session: host });
+        dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: host.id, title: host.title });
+        targetSessionIdRef.current = host.id;
+      }
+    }
+  }, [findSessionForEntry]);
+
   // 划词追问：先从原 entry 分支，再追加到分支 session 并回答
   const handleSelectionAsk = useCallback(async (question: string, entry: Entry | null) => {
     if (!entry) {
@@ -781,6 +1013,7 @@ export default function Home() {
     }
     const host = findSessionForEntry(entry);
     if (!host) return;
+    closeSegmentAndSummarize(host, entry);
     const forkNum = entry.children.length + 1;
     const child = createSession(`${host.title} (分支#${forkNum})`, host.groupId);
     child.parentSessionId = host.id;
@@ -793,14 +1026,22 @@ export default function Home() {
     targetSessionIdRef.current = child.id;
     dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: child.id, title: child.title });
     setFillValue(question);
-  }, [findSessionForEntry]);
+  }, [findSessionForEntry, closeSegmentAndSummarize]);
+
+  // 划词菜单：由划词（mouseup）自动触发，右键恢复浏览器默认行为。
+  // selectionMenuRef 持有当前菜单元素，selectionMenuTextRef 记录已弹出菜单对应的选中文本，
+  // 用于防重弹：点击外部关闭菜单时 mouseup 先于 click 触发，此时若文本相同直接忽略，交由随后的 click 关闭。
+  const selectionMenuRef = useRef<HTMLDivElement | null>(null);
+  const selectionMenuTextRef = useRef<string>("");
 
   const handleSelectionContextMenu = useCallback(
-    (e: React.MouseEvent, selectedText: string, entry: Entry | null) => {
+    (selectedText: string, entry: Entry | null, rect: { left: number; bottom: number }) => {
+      if (selectionMenuRef.current && selectionMenuTextRef.current === selectedText) return;
+      if (selectionMenuRef.current) selectionMenuRef.current.remove();
       const menu = document.createElement("div");
       menu.className = "fixed z-50 min-w-[180px] rounded-md border bg-popover p-1 shadow-md";
-      menu.style.left = `${e.clientX}px`;
-      menu.style.top = `${e.clientY}px`;
+      menu.style.left = `${rect.left}px`;
+      menu.style.top = `${rect.bottom + 4}px`;
 
       const focusBtn = document.createElement("button");
       focusBtn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
@@ -825,8 +1066,17 @@ export default function Home() {
       });
 
       document.body.appendChild(menu);
+      selectionMenuRef.current = menu;
+      selectionMenuTextRef.current = selectedText;
       const close = (ev: MouseEvent) => {
-        if (!menu.contains(ev.target as HTMLElement)) { menu.remove(); document.removeEventListener("click", close); }
+        if (!menu.contains(ev.target as HTMLElement)) {
+          menu.remove();
+          if (selectionMenuRef.current === menu) {
+            selectionMenuRef.current = null;
+            selectionMenuTextRef.current = "";
+          }
+          document.removeEventListener("click", close);
+        }
       };
       setTimeout(() => document.addEventListener("click", close), 0);
     },
@@ -859,6 +1109,28 @@ export default function Home() {
     dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
   }, []);
 
+  const handleCopyEntry = useCallback((entry: Entry) => {
+    navigator.clipboard.writeText((entry.userInput || "") + (entry.assistantOutput ? "\n\n" + entry.assistantOutput : ""));
+  }, []);
+
+  const handleEditSummary = useCallback(async (session: Session, entry: Entry, text: string) => {
+    entry.userInput = text;
+    entry.summaryEdited = true;
+    entry.summaryStatus = "done";
+    session.updated_at = Date.now();
+    await putNode(nodeRef.current!);
+    dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
+  }, []);
+
+  const regenerateSummary = useCallback(async (session: Session, entry: Entry) => {
+    const idx = session.entries.indexOf(entry);
+    if (idx < 1) return;
+    const forkEntry = session.entries[idx - 1];
+    const range = segmentRange(session, forkEntry);
+    if (!range) return;
+    await summarizeSegment(session, forkEntry, range, true);
+  }, [summarizeSegment]);
+
   const handleWorkGroupSelect = useCallback(
     (groupId: string) => {
       if (groupId === activeGroupId) return;
@@ -872,6 +1144,8 @@ export default function Home() {
       setGuideFocusPath([]);
       dispatchNode({ type: "CLEAR_NODE" });
       setShowGuideMap(false);
+      setShowTOC(false);
+      setInnerSessionId(null);
       setPreviewTitle("");
       setPreviewContent(null);
     },
@@ -894,6 +1168,8 @@ export default function Home() {
       setGuideFocusPath([]);
       dispatchNode({ type: "CLEAR_NODE" });
       setShowGuideMap(false);
+      setShowTOC(false);
+      setInnerSessionId(null);
       setPreviewTitle("");
       setPreviewContent(null);
       setActiveGroupId(group.id);
@@ -924,6 +1200,7 @@ export default function Home() {
         targetSessionIdRef.current = null;
         setGuideFocusPath([]);
         dispatchNode({ type: "CLEAR_NODE" });
+        setInnerSessionId(null);
         setPreviewTitle("");
         setPreviewContent(null);
         if (remaining[0]) {
@@ -942,7 +1219,8 @@ export default function Home() {
       if (!activeGroupId || !term.trim()) return;
       const group = workGroups.find((g) => g.id === activeGroupId);
       if (!group) return;
-      const newChild: GuideMapNode = { term: term.trim(), children: [] };
+      const boundNode = nodeList.find((n) => n.title.toLowerCase() === term.trim().toLowerCase());
+      const newChild: GuideMapNode = { term: term.trim(), children: [], nodeId: boundNode?.id };
       const newTree = group.guide_map ? structuredClone(group.guide_map) : { term: "", children: [] as GuideMapNode[] };
 
       let added = false;
@@ -980,7 +1258,7 @@ export default function Home() {
         setToast(`"${term.trim()}" 已存在于当前图层`);
       }
     },
-    [activeGroupId, workGroups]
+    [activeGroupId, workGroups, nodeList]
   );
 
   const lastMapClickRef = useRef<{ term: string; time: number } | null>(null);
@@ -1000,7 +1278,13 @@ export default function Home() {
         lastMapClickRef.current = { term, time: now };
         setPreviewTitle(term);
 
-        const n = nodeList.find(x => x.title.toLowerCase() === term.toLowerCase());
+        // 优先按 nodeId 精确匹配被点击的导图节点；自由节点/旧数据无 nodeId 时回退 term 匹配
+        let n: Node | undefined;
+        if (nodePath && nodePath.length > 0 && activeGroup?.guide_map) {
+          const gnode = getNodeByPath(activeGroup.guide_map, nodePath);
+          if (gnode?.nodeId) n = nodeList.find((x) => x.id === gnode.nodeId);
+        }
+        if (!n) n = nodeList.find(x => x.title.toLowerCase() === term.toLowerCase());
         if (n) {
           setPreviewContent(buildNodePreview(n));
         } else {
@@ -1008,7 +1292,7 @@ export default function Home() {
         }
       }
     },
-    [handleFocusNode, guideFocusPath, buildNodePreview]
+    [handleFocusNode, guideFocusPath, buildNodePreview, activeGroup?.guide_map, nodeList]
   );
 
   const handleGuideMapNavigate = useCallback((focusPath: number[], pathStr: string) => {
@@ -1059,7 +1343,7 @@ export default function Home() {
     const group = workGroups.find((g) => g.id === activeGroupId);
     if (!group?.guide_map) return;
     if (scopePath.length === 0) {
-      group.guide_map = { term: "", children: nodeList.map(n => n.title).map((t) => ({ term: t, children: [] as GuideMapNode[] })) };
+      group.guide_map = { term: "", children: nodeList.map((n) => ({ term: n.title, children: [] as GuideMapNode[], nodeId: n.id })) };
     } else {
       let node: GuideMapNode | undefined;
       if (group.guide_map.term === "") {
@@ -1081,7 +1365,7 @@ export default function Home() {
           }
         };
         node.children.forEach(collect);
-        node.children = terms.map((t) => ({ term: t, children: [] as GuideMapNode[] }));
+        node.children = terms.map((t) => ({ term: t, children: [] as GuideMapNode[], nodeId: nodeList.find((n) => n.title.toLowerCase() === t.toLowerCase())?.id }));
         group.guide_map = JSON.parse(JSON.stringify(group.guide_map));
       }
     }
@@ -1090,13 +1374,6 @@ export default function Home() {
     setWorkGroups((prev) => prev.map((g) => (g.id === activeGroupId ? { ...group } : g)));
   }, [activeGroupId, workGroups, nodeList]);
 
-  // 当前树节点在导图中的位置（树视图面包屑与 Esc 循环回退的目标）
-  const currentNodeGuidePath = useMemo<number[]>(() => {
-    const title = nodeState.node?.title;
-    if (!title) return [];
-    return findNodePath(activeGroup?.guide_map ?? null, title) ?? [];
-  }, [activeGroup?.guide_map, nodeState.node?.title]);
-
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -1104,6 +1381,15 @@ export default function Home() {
         const t = e.target as HTMLElement | null;
         if (t && !t.classList.contains("omni-input-bar") && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
         if (showGuideMap) return;
+        // 内层（单一根 Session 工作区）：Esc 退回外层目录；组合视图↔树 的 Esc 循环只发生在外层
+        if (!showTOC && innerSessionId) {
+          setShowTOC(true);
+          setInnerSessionId(null);
+          targetSessionIdRef.current = null;
+          const node = nodeRef.current;
+          if (node) dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: node.id, title: node.title });
+          return;
+        }
         if (nodeState.node) {
             const entry: NavEntry = { type: "guideMap", pathStr: "根", focusPath: guideFocusPath };
             navPushedRef.current = false;
@@ -1113,7 +1399,7 @@ export default function Home() {
               return next;
             });
             setNavIndex((prev) => navPushedRef.current ? prev + 1 : prev);
-          ensureGuideMap();
+          ensureGuideMap(undefined, nodeState.node.id);
           setShowGuideMap(true);
         }
       }
@@ -1121,30 +1407,16 @@ export default function Home() {
           e.preventDefault();
           setNavIndex(navIndex - 1);
           const entry = navHistory[navIndex - 1];
-          if (!entry) return;
-          if (entry.type === "tree") {
-            setShowGuideMap(false);
-            handleFocusNode(entry.term, true);
-          } else {
-            setShowGuideMap(true);
-            setGuideFocusPath(entry.focusPath);
-          }
+          if (entry) applyNavEntry(entry);
         }
         if (e.altKey && e.key === "ArrowRight" && navIndex < navHistory.length - 1) {
           e.preventDefault();
           setNavIndex(navIndex + 1);
           const entry = navHistory[navIndex + 1];
-          if (!entry) return;
-          if (entry.type === "tree") {
-            setShowGuideMap(false);
-            handleFocusNode(entry.term, true);
-          } else {
-            setShowGuideMap(true);
-            setGuideFocusPath(entry.focusPath);
-          }
+          if (entry) applyNavEntry(entry);
         }
     },
-    [showGuideMap, nodeState.node, ensureGuideMap, navHistory, navIndex, handleFocusNode, guideFocusPath]
+    [showGuideMap, showTOC, innerSessionId, nodeState.node, ensureGuideMap, navHistory, navIndex, guideFocusPath, applyNavEntry]
   );
 
   useEffect(() => {
@@ -1187,8 +1459,10 @@ export default function Home() {
 
   const inputBar = (
     <InputBar
-      tagLabel={showGuideMap ? "在当前层级新增节点" : nodeState.activeTag.title}
+      tagLabel={showGuideMap ? "在当前层级新增节点" : showTOC ? "" : nodeState.activeTag.title}
       tagPrefix={showGuideMap ? "" : undefined}
+      placeholder={showTOC ? `在「${nodeState.node?.title ?? ""}」下开始对话` : undefined}
+      forceCreate={!showGuideMap}
       fillValue={fillValue}
       wide={rightCollapsed}
       onFocus={(text) => { setFillValue(""); handleFocusNode(text); }}
@@ -1268,6 +1542,8 @@ export default function Home() {
                 targetSessionIdRef.current = null;
                 dispatchNode({ type: "CLEAR_NODE" });
                 setShowGuideMap(false);
+                setShowTOC(false);
+                setInnerSessionId(null);
                 setPreviewTitle("");
                 setPreviewContent(null);
                 setSidebarSearch("");
@@ -1314,10 +1590,11 @@ export default function Home() {
                 if (nodeState.node?.title === term) {
                   dispatchNode({ type: "CLEAR_NODE" });
                   targetSessionIdRef.current = null;
+                  setInnerSessionId(null);
                   setPreviewTitle("");
                   setPreviewContent(null);
                 }
-                removeFromGuideMap(term);
+                removeFromGuideMap(n?.id ?? "");
               }}
               onNodeRename={(oldTerm, newTerm) => {
                 if (!newTerm || oldTerm === newTerm) return;
@@ -1329,7 +1606,7 @@ export default function Home() {
                   putNode(n);
                   setNodeList(prev => prev.map(x => x.id === n.id ? n : x));
                 }
-                updateGuideMapTerm(oldTerm, newTerm);
+                updateGuideMapTerm(n?.id ?? "", newTerm);
                 if (isCurrent) {
         if (pdfBoundNodeRef.current === oldTerm) {
           setPdfBoundNode(newTerm);
@@ -1351,7 +1628,8 @@ export default function Home() {
                     group.guide_map = { term: "", children: [] };
                   }
                   const path = guideFocusPath;
-                  const newChild: GuideMapNode = { term: term.trim(), children: [] };
+                  const boundNode = nodeList.find((n) => n.title.toLowerCase() === term.trim().toLowerCase());
+                  const newChild: GuideMapNode = { term: term.trim(), children: [], nodeId: boundNode?.id };
                   const newTree = structuredClone(group.guide_map);
 
                   let added = false;
@@ -1417,10 +1695,11 @@ export default function Home() {
                   if (nodeState.node?.title === term) {
       dispatchNode({ type: "CLEAR_NODE" });
       targetSessionIdRef.current = null;
+      setInnerSessionId(null);
                     setPreviewTitle("");
                     setPreviewContent(null);
                   }
-                  removeFromGuideMap(term);
+                  removeFromGuideMap(n?.id ?? "");
                 }}
               plusMenuItems={plusMenuItems}
               onPlusMenuItemsChange={savePlusMenu}
@@ -1458,14 +1737,7 @@ export default function Home() {
                     if (navIndex <= 0) return;
                     setNavIndex(navIndex - 1);
                     const entry = navHistory[navIndex - 1];
-                    if (!entry) return;
-                    if (entry.type === "tree") {
-                      setShowGuideMap(false);
-                      handleFocusNode(entry.term, true);
-                    } else {
-                      setShowGuideMap(true);
-                      setGuideFocusPath(entry.focusPath);
-                    }
+                    if (entry) applyNavEntry(entry);
                   }}
                   className="p-0.5 rounded hover:bg-accent disabled:opacity-30 transition-colors"
                   title="Alt+← 后退"
@@ -1478,14 +1750,7 @@ export default function Home() {
                     if (navIndex >= navHistory.length - 1) return;
                     setNavIndex(navIndex + 1);
                     const entry = navHistory[navIndex + 1];
-                    if (!entry) return;
-                    if (entry.type === "tree") {
-                      setShowGuideMap(false);
-                      handleFocusNode(entry.term, true);
-                    } else {
-                      setShowGuideMap(true);
-                      setGuideFocusPath(entry.focusPath);
-                    }
+                    if (entry) applyNavEntry(entry);
                   }}
                   className="p-0.5 rounded hover:bg-accent disabled:opacity-30 transition-colors"
                   title="Alt+→ 前进"
@@ -1493,39 +1758,50 @@ export default function Home() {
                   <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
                 </button>
               </div>
-              <span className="font-semibold text-base shrink-0">{activeGroup?.name || "OmniExplore"}</span>
               {!showGuideMap && nodeState.node && (
-                <div className="flex items-center min-w-0 ml-2">
-                  <button
-                    onClick={() => { ensureGuideMap(); setShowGuideMap(true); }}
-                    className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors shrink-0"
-                    title="进入组合视图"
-                  >
-                    <Layers className="w-4 h-4" />
-                    <span className="text-xs">组合</span>
-                  </button>
-                  <GuideBreadcrumb
-                    map={activeGroup?.guide_map ?? null}
-                    path={currentNodeGuidePath}
-                    onRoot={() => { ensureGuideMap(); setGuideFocusPath([]); setShowGuideMap(true); }}
-                    onNavigate={(p) => { ensureGuideMap(); setGuideFocusPath(p); setShowGuideMap(true); }}
-                  />
-                  <ChevronRight className="w-4 h-4 text-muted-foreground mx-0.5 shrink-0" />
-                  <span className="text-xs font-medium truncate">{nodeState.node?.title ?? ""}</span>
+                <div className="flex items-center min-w-0 ml-3">
+                  {!showTOC && innerSessionId ? (
+                    <>
+                      <button
+                        onClick={() => setShowTOC(true)}
+                        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors shrink-0"
+                        title="返回目录"
+                      >
+                        <List className="w-4 h-4" />
+                        <span>目录</span>
+                      </button>
+                      <span className="w-px h-4 bg-border mx-2 shrink-0" />
+                      <span className="text-base font-semibold truncate">{nodeState.node?.title ?? ""}</span>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => { ensureGuideMap(); setShowGuideMap(true); }}
+                        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors shrink-0"
+                        title="进入组合视图"
+                      >
+                        <Layers className="w-4 h-4" />
+                        <span>组合</span>
+                      </button>
+                      <span className="w-px h-4 bg-border mx-2 shrink-0" />
+                      <span className="text-base font-semibold truncate">{nodeState.node?.title ?? ""}</span>
+                    </>
+                  )}
                 </div>
               )}
               {showGuideMap && (
-                <div className="flex items-center min-w-0 ml-2">
+                <div className="flex items-center min-w-0 ml-3">
                   <button
                     onClick={handleGuideMapHeaderEsc}
-                    className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                    className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors shrink-0"
                     title={guideFocusPath.length > 0 ? "ESC 返回上层" : "返回树视图"}
                   >
                     <ArrowLeft className="w-4 h-4" />
-                    <span className="text-xs">{guideFocusPath.length > 0 ? "上层" : "返回"}</span>
+                    <span>{guideFocusPath.length > 0 ? "上层" : "返回"}</span>
                   </button>
                   {activeGroup?.guide_map && (
                     <>
+                      <span className="w-px h-4 bg-border mx-2 shrink-0" />
                       <GuideBreadcrumb
                         map={activeGroup.guide_map}
                         path={guideFocusPath}
@@ -1534,7 +1810,7 @@ export default function Home() {
                       />
                       <button
                         onClick={() => handleGuideMapRebuild(guideFocusPath)}
-                        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors ml-2 shrink-0"
+                        className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors ml-2 shrink-0"
                         title="从节点库重建"
                       >
                         <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 2v6h-6M3 12a9 9 0 0115.36-6.36L21 8M3 22v-6h6M21 12a9 9 0 01-15.36 6.36L3 16"/></svg>
@@ -1562,7 +1838,7 @@ export default function Home() {
 
           <div className="flex-1 flex flex-col min-h-0">
               {showGuideMap ? (
-              <div className="flex-1 min-h-0 max-w-4xl mx-auto w-full">
+              <div className="flex-1 min-h-0 max-w-4xl mx-auto w-full pt-4 pr-4 pb-24">
               <GuideMapCanvas
                 guideMap={activeGroup?.guide_map ?? null}
                 initialFocusPath={guideFocusPath}
@@ -1587,12 +1863,34 @@ export default function Home() {
                 onRebuild={handleGuideMapRebuild}
               />
               </div>
-            ) : nodeState.node ? (
-              <div className="flex-1 overflow-auto" onClick={() => handleSelectSession(null)}>
+            ) : showTOC && nodeState.node ? (
+              <div className="flex-1 overflow-auto [scrollbar-gutter:stable]">
                 <div className="flex flex-col min-h-full">
                   <div className="flex-1">
-                    <div className="max-w-4xl mx-auto pt-4 pr-4 pb-24">
+                    <div className="max-w-3.5xl mx-auto pt-4 pr-4 pb-24">
+                      <SessionTOC
+                        key={nodeState.node.id}
+                        node={nodeState.node}
+                        onSelectSession={handleTOCSelectSession}
+                        onEnterSummary={handleTOCEnterSummary}
+                        onEditSummary={(sessionId, entry, text) => { const s = findSessionInTree(sessionId); if (s) handleEditSummary(s, entry, text); }}
+                        onRegenerateSummary={(sessionId, entry) => { const s = findSessionInTree(sessionId); if (s) regenerateSummary(s, entry); }}
+                      />
+                    </div>
+                  </div>
+                  <div className="sticky bottom-0 z-50 shrink-0">
+                    {inputBar}
+                  </div>
+                </div>
+              </div>
+            ) : nodeState.node ? (
+              <div className="flex-1 overflow-auto [scrollbar-gutter:stable]">
+                <div className="flex flex-col min-h-full">
+                  <div className="flex-1">
+                    {/* 内层（无 Node 顶行，sticky 首行 top=0 贴顶）去掉 pt-4，避免展开/收起时顶部空隙跳变 */}
+                    <div className={cn("max-w-3.5xl mx-auto pr-4 pb-24", !innerSessionId && "pt-4")}>
                       <NodeView key={nodeState.node.id} node={nodeState.node}
+                        focusedSessionId={innerSessionId}
                         selectedEntry={nodeState.selectedEntry}
                         selectedSession={nodeState.selectedSession}
                         onSelectNode={() => handleSelectSession(null)}
@@ -1607,10 +1905,11 @@ export default function Home() {
                           dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: session.id, title });
                           targetSessionIdRef.current = session.id;
                         }}
-                        onEditEntry={(session, entry) => setEditingEntry(entry)} onDeleteEntry={handleDeleteEntry} onForkEntry={handleForkEntry}
+                        onEditEntry={(session, entry) => setEditingEntry(entry)} onCopyEntry={handleCopyEntry} onDeleteEntry={handleDeleteEntry} onForkEntry={handleForkEntry}
                         onRenameSession={handleRenameSession} onRenameNode={handleRenameNode} onDeleteNode={handleDeleteNodeFromMenu}
                         plusItems={subPlusMenuItems} rootPlusItems={rootPlusMenuItems} editingEntry={editingEntry} renamingNodeId={renamingNodeId}
                         onEditingChange={handleEditingChange} onEditSubmit={handleEditSubmit} onNodeRenameSubmit={handleNodeRenameSubmit}
+                        onEditSummary={handleEditSummary} onRegenerateSummary={regenerateSummary}
                       />
                     </div>
                   </div>
@@ -1623,6 +1922,7 @@ export default function Home() {
               <Onboarding
                 recentTerms={recentInputs}
                 onTermClick={handleFocusNode}
+                onRemoveTerm={removeRecentInput}
                 onSubmit={handleFocusNode}
               />
             )}
@@ -1648,7 +1948,7 @@ export default function Home() {
               pdfBindingsRef.current.set(activePdf.name, termName);
               saveBindings();
             }}
-            onSelectionContextMenu={(e, sel) => handleSelectionContextMenu(e as any, sel, null)}
+            onSelectionContextMenu={(sel, rect) => handleSelectionContextMenu(sel, null, rect)}
           />
         ) : (
         <PreviewPanel

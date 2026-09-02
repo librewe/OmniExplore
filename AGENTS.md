@@ -1,907 +1,108 @@
 # AGENTS.md
 
-> 本文档166行及以后是完整用户输入历史，无需在意。
-
-> OmniExplore 开发起点 — 2026-07-26。由 Sisyphus (OhMyOpenCode) 完成约 15 轮迭代构建。
-> 2026-08-11 — 数据模型重构：ConceptNode 树 → Node: Session/Entry 相互归纳结构。
-> 2026-08-13 — 重构完成：彻底删除旧 ConceptNode/TreeNode/树 reducer，命名统一 node，上下文链式传递实现，子 Session 仅嵌套存储。
-> 2026-08-13(b) — 工作组节点库隔离（Session.groupId + active_group_id 持久化 + 按组重载）、划词追问接入 fork 流程、parentEntryId→parentSessionId 更名（含 migrateData 迁移）、Entry.sessionId 死字段清除。
-> 2026-08-17 — 数据模型再重构：Node 从"根 Session"升级为**主题容器**（`Node.sessions: Session[]`），根 Session 降格为 Node 下平级子行；根 Session 加号菜单由四预设扩为**五预设**（Default + 四预设，`${term}`→`${node}`）；Node 加号改为直接创建根 Session；导图/术语标注/PDF 绑定/导航历史全部以 Node 为单位；migrateData 将旧根 Session 包装为 Node（同标题合并，幂等）。
-> 2026-08-18 — 深色主题接线（ThemeMenu 三态：亮/暗/跟随系统，localStorage `theme` 持久化 + layout 首帧防闪脚本 + NodeView 粘滞行改 CSS 变量 + color-mix 祖先高亮）；PlusMenu 改 createPortal 挂 body；右侧栏默认折叠；流式自动打断（新流启动时 abort 旧流，旧 entry 也置 done）；migrateData 合并键含 groupId（防跨组合并）。
+> OmniExplore — 本地优先的认知考古工具。开发起点 2026-07-26，由 Sisyphus (OhMyOpenCode) 迭代构建。
+> 2026-08-19 — 文档重构：本文件精简为枢纽，详细知识拆分至 [agents/](agents/) 目录。
 
 ## 项目定位
 
 本地优先的认知考古工具。纯前端 SPA（Next.js 静态导出），无后端，无 auth。用户创建 Node（主题）→ 在 Node 下创建根 Session → 添加 Entry（上下文节点）→ 追问 LLM → Entry 可 fork 出子 Session → 递归展开。按 Esc 进入组合视图。左侧栏支持**节点**和**文件**两个 tab。
 
-## 关键理解
+## 核心架构速查（改动 Node/Session/Entry 数据前必读）
 
-### 数据结构：互相归纳
+### 数据模型：互相归纳
 
 ```
-Node         =  主题容器：title + Session[]（根 Session 列表）
-Session      =  title + Entry[]（根 Session 无 parentSessionId，挂 Node.sessions；子 Session 挂 entry.children）
-Entry        =  userInput + assistantOutput + Session[]（children）
+Node      = 主题容器：title + Session[]（根 Session 列表）
+Session   = title + Entry[]（根 Session 无 parentSessionId，挂 Node.sessions；子 Session 挂 entry.children）
+Entry     = userInput + assistantOutput + Session[]（children）
 ```
 
-- Node 是**奇层点（0 层）**，Session 是**偶层点（1 层）**，Entry 是**奇层点（2 层）**，之后交替嵌套。Node 下多个根 Session 平级。
-- Node 标题即"概念/主题"——侧栏节点库、导图 term、[[术语]]标注、PDF 绑定、悬停预览、导航历史全部以 Node 标题为单位。
-- "聚焦"只用于 Node（`handleFocusNode`）；"选中"用于 Session（`handleSelectSession`）。
-- Entry.children 存的是子 Session **对象引用**（非 ID），渲染时直接从树上取。
-- Entry 无独立 ID——操作均传递对象引用，就地修改。
-- Session.parentSessionId 是反向引用（子→父 Session）。Entry 无独立 ID，fork 源 entry 通过 `父.entries.findIndex(e => e.children.some(c => c.id === 子.id))` 定位。
+- Node 奇层点（0 层）→ Session 偶层点（1 层）→ Entry 奇层点（2 层），交替嵌套
+- Node 标题即"概念/主题"——侧栏节点库、导图 term、[[术语]]标注、PDF 绑定、悬停预览、导航历史全部以 Node 标题为单位
+- "聚焦"只用于 Node（`handleFocusNode`）；"选中"用于 Session（`handleSelectSession`）
+- Entry.children 存子 Session **对象引用**（非 ID）；Entry 无独立 ID——操作均传对象引用，就地修改
 
-### 两个数据视图
+### 就地修改 + 触发重渲染（最关键的坑）
 
-| 视图 | 数据 | 用途 |
-|---|---|---|
-| `nodeRef.current` | 当前聚焦的主题 Node（`Node.sessions` 树） | 中央渲染：NodeView 展开 Node → 根 Session → Entry → 子 Session |
-| `nodeList` | `Node[]`，当前工作组全部主题 | 侧栏 `nodeTitles` prop |
+所有 handler 对 Node/Session/Entry **就地修改**（不创建新对象），然后 `dispatchNode(REPLACE_NODE, node: nodeRef.current!)` 触发重渲染。reducer 返回 `{ ...state }` 新 state 但 **node 保持同一对象引用**——`nodeList` 与内存树永远共享同一对象。若浅拷贝创建新 node 对象，侧栏快照与内存树分离，切走再切回会**覆盖丢数据**（2026-08-14 修复的坑）。
 
-> 注意：`nodeRef.current` 始终指向**主题 Node**。根 Session 作为 `node.sessions` 对象嵌套，子 Session 作为 `entry.children` 对象嵌套——绝不做独立顶层记录（否则刷新后数据丢失）。
-
-### 就地修改 + 触发重渲染
-
-所有 handler 对 Node/Session/Entry 做**就地修改**（不创建新对象），然后 `dispatchNode(REPLACE_NODE, node: nodeRef.current!)` 触发 React 重渲染——reducer 返回新 state 对象（`{ ...state }`）但 **node 保持同一对象引用**，NodeView 重渲染时读取已就地修改的数据。因为树上引用共享同一对象，修改自动可见。
-
-> 关键坑（2026-08-14 修复）：早期 `REPLACE_SESSION` 用 `{ ...nodeRef.current }` 浅拷贝创建新根对象，导致侧栏 `nodeList` 快照与内存树对象分离、逐渐过期——连续添加 note 后切走再切回（`handleFocusNode` 用过期 nodeList 对象 `SET_SESSION`）会覆盖丢数据。现在 reducer 一律**保持 node 对象身份不变**，`nodeList` 与内存树永远共享同一对象，从根上消除过期快照问题。target 目标仍统一存 **ID**（`targetSessionIdRef`），通过 `findSessionInTree(id)` 定位对象。
+- 目标 Session 统一存 **ID**（`targetSessionIdRef`），经 `findSessionInTree(id)` 在最新树定位对象
+- 持久化只写 **Node 顶层记录**（根 Session 作 `node.sessions`、子 Session 作 `entry.children` 嵌套）——绝不做独立顶层记录（否则刷新后数据丢失）
 
 ### 上下文传递（已实现）
 
-链式：每个 Entry 构建时携带其前序 Entry 的 user+assistant 作为上下文。消息数组构建规则：
-1. system 提示词（仅一次，硬编码"你是一个有帮助的人工智能助手"）
-2. 若当前 Session 是 fork（有 `forkBoundary`）：沿 `parentSessionId` 链上溯，每层祖先 Session 的 entries 取到 fork 点为止，且每层 fork 边界标记 `--- fork boundary ---` 插在该层 entries **之前**
-3. 当前 Session 的前序 entries（`slice(0, -1)`）
-4. 当前 userInput
+每个 Entry 构建时携带前序 Entry 上下文，消息数组规则：system 一次（硬编码"你是一个有帮助的人工智能助手"）→ fork 祖先链（沿 `parentSessionId` 上溯，每层 entries 取到 fork 点，`--- fork boundary ---` 插每层 entries 前）→ 当前 Session 前序 entries → 当前输入。`qa` 作消息对，`note` 作 `[笔记] xxx`。祖先链逻辑在 `buildForkChain`（contextBuilder.ts 导出），**`buildMessages` 与段摘要生成共用**——`summarizeSegment` 组装摘要消息时先 `buildForkChain` 上溯到根/摘要种子，再拼段内容（`segment.start..end`）+ summaryPrompt，保证子 Session 总结不缺父上下文。
 
-- `qa` entry 作为 user/assistant 消息对；`note` entry 作为 `[笔记] xxx` user 消息。
-- fork 点之后的 entries 不纳入上下文（`findIndex` 定位 fork 源 entry）。
+## Agent 文档
 
-## 已完成
-
-### 核心数据流
-
-```
-用户输入节点 → InputBar(无 tag)
-  → handleFocusNode → createNode（主题）
-    → nodeStore SET_NODE → putNode → NodeView 展开
-用户输入上下文 → InputBar(tag)
-  → handleCreateEntry → 就地修改 Session.entries
-    → 未选中根 Session 时自动建根 Session（标题取输入截断）
-    → putNode 持久化 → REPLACE_NODE 重渲染
-```
-
-### 组件树
-
-```
-layout.tsx
-└─ page.tsx  （状态枢纽 ~2100 行）
-   ├─ 左侧栏 (可拖拽宽度)
-   │   ├─ WorkGroupSwitcher
-   │   ├─ 共享搜索框 + Tab(节点|文件)
-   │   ├─ TermLibrary / FilesList
-   │   └─ SettingsPanel（设置按钮）
-   ├─ 中央 (flex-1)
-   │   ├─ 导航栏（← → 按钮 + 返回/前进下拉 + 工作区标题）
-   │   ├─ 树面包屑栏（组合 + 簇 > ... 路径）
-   │   ├─ NodeView / GuideMapCanvas （二选一，showGuideMap 切换）
-   │   ├─ Onboarding （无 Node 时显示）
-   │   └─ InputBar （底部固定）
-   ├─ 右侧栏 (可拖拽宽度，PDF 时自动扩展至 45%)
-   │   ├─ PreviewPanel（树预览）
-   │   └─ PDFViewer（PDF 阅读，划词右键聚焦）
-   └─ SettingsPanel （Dialog 弹窗）
-```
-
-### 状态管理
-
-| Store | 机制 | 用途 |
+| 文档 | 内容 | 何时读 |
 |---|---|---|
-| `nodeStore` | useReducer | 当前 Node 树（Node.sessions 及嵌套 Session/Entry）：增删改、选中、streaming 追加 |
-| `configStore` | Zustand | LLM 配置、预设提示词、加号菜单项（localStorage 持久化） |
-| page 本地 state | useState/useRef | activeGroupId, showGuideMap, previewNode, navHistory, guideFocusPath, leftWidth/rightWidth, leftCollapsed/rightCollapsed, isResizing, leftTab, storedFiles, activePdf, pdfBoundNode, sidebarSearch... |
-| `nodeRef` | useRef | 当前聚焦的主题 Node 的引用（始终最新），handler 直接读取 |
-| `nodeList` | useState | 当前工作组的主题 Node 列表（侧栏数据源），组切换时经 `loadNodeList(groupId)` 重载（带竞态序号守卫） |
-| `targetSessionIdRef` | useRef | +菜单/点击选中的目标 Session **ID**，Entry 操作优先写入此目标（存 ID 避免浅拷贝引用过时）；未选中 Session 时为 null（输入自动建根 Session） |
-| `contextSessionRef` / `contextNodeRef` | useRef | 右键菜单被操作 Session / 主题 Node 的引用 |
-| `renameTargetRef` | useRef | inline 重命名目标（`{type:"node",node}` 或 `{type:"session",session}`） |
-| `streamingAbortRef` | useRef | 流式 AbortController，新流启动时 abort 旧流 |
+| [agents/ARCHITECTURE.md](agents/ARCHITECTURE.md) | 完整数据模型、两个数据视图、就地修改模式、状态管理表、核心数据流、组件树 | 改动涉及数据/结构/状态时 |
+| [agents/CONVENTIONS.md](agents/CONVENTIONS.md) | 关键约定全集（~30 条黄金规则）、未实现需求、已知限制 | 新增功能/UI 交互前逐条核对 |
+| [agents/HISTORY.md](agents/HISTORY.md) | 用户输入历史（决策上下文档案） | 日常开发**无需**阅读 |
 
-> 已删除的遗留 store/ref：`footprintStore`、`treeStore`、`sessionMapRef`、`targetSessionRef`（对象版）、`targetNodeIdRef`（→`targetSessionIdRef`）、`renameNodeRef`（→`renameTargetRef`）。
+## 构建与验证
 
-### 关键约定
+```bash
+npm run dev          # 开发服务器
+npm run build        # 静态构建 → out/（仅交付前跑；与 dev 共享 .next/，勿并行）
+npm run typecheck    # 快速类型检查（tsc --noEmit，实测 ~4-8s，日常验证主力）
+npm test             # Vitest 单元测试（test/ 目录，涉及 services 逻辑改动后跑）
+npm run test:watch   # vitest 监听模式（开发 services 时用）
+npm run check        # 提交前一键门禁：typecheck + test + lint 全过
+```
 
-- **节点占位符**：plus 菜单模板用 `${node}`（点击时替换为当前主题标题再填充输入框，`${term}` 兼容旧配置）；划词菜单用 `${selected}`（选中文本）和 `${root}`/`${node}`（当前主题名）
-- **IndexedDB**：`nodes` store 存主题 Node 对象（含嵌套根 Session/Entry/children，仅 Node 顶层记录）；`work_groups` store 存工作组；`files` store 存 PDF 等文件；`sessions` store 仅迁移用（历史遗留）
-- **localStorage**：`active_group_id` 存最近激活工作组（刷新恢复），`plus_menu_items` 存 +菜单，`selection_menu_items` 存划词菜单，`pdf_bindings` 存 PDF→节点绑定
-- **SSE 超时**：仅连接超时 30s，流式无总体超时
-- **Entry 类型**：`qa`（输入框/模板触发 LLM）、`note`（空上下文，用户笔记）
-- **Entry 标题**：无论折叠/展开均截断首行 30 字符（省略号按首行长度判断）；note 空内容显示"(双击或右键编辑)"
-- **note 渲染**：note 与 qa 内容统一走 TermText（markdown 渲染 + 术语标注）；文本段经 MarkdownRenderer inline 渲染、节点库术语自由匹配 + 显式 `[[术语]]` 均标注
-- **层级粘滞滚动**：Session/Entry 行 `position: sticky`，行秩连续计数（Node=0→根 Session=1→entry=2→子 Session=3…），`top = 行秩 × 28px`（ROW_H 须小于行高约 30px 以覆盖阶梯缝隙，防止透出内容）；选中态实色背景
-- **System prompt**：硬编码 `"你是一个有帮助的人工智能助手"`，不暴露给用户编辑
-- **组合视图虚拟根**：`{term:"", children:[...]}`；GuideMapCanvas 检测 `!guideMap.term` 渲染 children 平级
-- **tag**：InputBar 的 `tagLabel` 来自 `nodeState.activeTag.title`——选中 Session 时为 Session 标题，否则为当前主题标题（"追加到 {主题}"）；未选中 Session 时输入直接提交视为追加到 node，自动新建根 Session（标题取输入截断）
-- **新建菜单（+）**：主题 Node 的 + **无菜单**，点击直接创建根 Session（"未命名"并立即 inline 重命名）；根 Session 用**五预设**（Default + 动态直觉/看定义/看应用/看动机，system+user 配套，user 模板 `${node}` 发送前替换为主题名）；一般 Session 用 plusMenuItems（默认"精简概括一点"/"介绍更多"，可设置中自定义）；"新增上下文"固定常驻
-- **划词菜单**：聚焦 + 自定义模板（默认"简单介绍"/"指什么"/"为什么"，`${selected}` 替换选中文本、`${root}` 替换当前主题名）；点击后从源 entry fork 出分支 Session 并填充输入框
-- **预设 system prompt**：五预设点击时经 `presetSystemRef` 记录对应 system，`handleCreateEntry` 发送时一次性使用（Default 与一般会话均用"你是一个有帮助的人工智能助手"）
-- **导航历史**：`NavEntry[]` 联合类型，每工作组独立；返回/前进按钮 + Alt+←/→ 直接跳转（无下拉列表）；侧栏节点点击经 `handleFocusNode` 推历史（可退回），导航触发时传 `silent=true` 跳过推历史避免污染
-- **术语悬停预览**：HoverPreview 组件（`pointer-events-none` 防卡滞），悬停标注术语显示主题首行摘要（首个根 Session 的首个 entry 首行）；80ms 显示延迟，点击任意处关闭
-- **工作组隔离**：节点库/导图/导航历史均按工作组隔离；主题归属 `Node.groupId`（根 Session 嵌套继承）；切换组时重置 target/guideFocusPath 并重载 nodeList
-- **数据迁移**：`migrateData()` 于启动时执行——旧 `parentEntryId`→`parentSessionId`、清 `Entry.sessionId`、无归属根 Session 补首个工作组 ID；根 Session → 主题 Node 包装（仅当 nodes store 为空时执行，同标题根 Session 合并为一个 Node，**合并键含 `groupId`** 防跨组合并，幂等）
-- **深色主题**：ThemeMenu 三态（亮/暗/跟随系统），localStorage `theme` 持久化，layout.tsx 内联脚本首帧防闪（匹配 `prefers-color-scheme`）；NodeView 粘滞行背景用 CSS 变量（`hsl(var(--background))`）+ `color-mix` 祖先高亮；切换时挂 `theme-fade-overlay` 淡入过渡
-- **ESC 行为**：组合视图中沿面包屑退出，根层回树视图
-- **面包屑**："簇"代替"根"
-- **数据操作模式**：handler 对树上 Node/Session/Entry **就地修改**，然后 `dispatchNode(REPLACE_NODE, { ...nodeRef.current! })` 触发重渲染
-- **根 Session**：无独立顶层 IndexedDB 记录（作为 `node.sessions` 对象直接嵌套）；子 Session 作为 `entry.children` 对象直接嵌套
-- **流式**：`SET_STREAMING_CONTENT` 累积式设值（非增量追加），避免 SSE 重复
-- **编辑**：仅末位未响应 entry 可编辑（`isEditable = isLast && !assistantOutput`）；Escape 还原快照
-- **fork 命名**：`(分支#N)` 顺序编号；fork 后自动展开
-- **划词追问**：从源 entry fork 出子 Session（`parentSessionId` + `forkBoundary`），追加到分支并回答；无 entry 上下文（PDF 划词）时回退到当前主题（未选中 Session 则提交时自动建根 Session）
-- **流式自动打断（现状，计划重构为排队等待）**：`streamingAbortRef` 新流启动时 abort 旧流；旧流被中断后其 entry **也置 `done`**（部分内容保留），避免图标永远停留"加载中"。缺点：旧流残留半截回答、浪费已消耗额度、依赖它的新流上下文残缺——计划改为等待而非打断（见未实现需求）
-- **右侧栏默认折叠**：`rightCollapsed` 初始 `true`（`prevRightCollapsedRef` 同步），PDF 打开自动展开、关闭恢复折叠前状态
+- **日常验证分层**：LSP 诊断（实时，覆盖绝大部分类型错误）→ `npm run typecheck`（秒级，确定性兜底）→ `npm test`（涉及 services/纯逻辑改动）→ `npm run build`（分钟级，仅交付前/涉及打包产物改动）
+- **提交前**：`npm run check` 一条命令全过（typecheck + test + lint）
+- 涉及数据/类型改动用 `npm run typecheck` 验证即可；涉及 `contextBuilder`/`segments` 等纯逻辑改动补跑 `npm test`；仅路由、静态资源、next 配置类改动才需要完整 build
 
-### 未实现的需求（来自 简化需求.md）
+## 开发工作流
 
-- 后续规划全部（撤销/重做、反向链接、浏览器插件等）
-- **LLM 中止（用户手动打断）**：目前仅新流启动时自动 abort 旧流，用户无法主动停止正在进行的流式输出——需在流式过程中提供中止按钮/快捷键（如 Esc 或 entry 行内停止按钮），中断后 entry 置 `done` 保留部分内容
-- **流式排队等待（重构，替代自动打断）**：现状新流启动时 abort 旧流，导致旧流残留半截回答、浪费已消耗额度、依赖它的新流上下文残缺。改为**等待而非打断**：新流发起前检测是否有流在跑——若新流的上下文链（同 Session 前序 entries / fork 祖先链）依赖旧流，则等待旧流自然完成后自动启动，保证上下文含完整答案；跨 Session/Node 的独立流可并行。涉及：`streamingAbortRef` 单槽 → `Map<entryId, AbortController>`、等待态 UI 提示（如"等待当前回答完成"）、新 entry 创建时机后移到旧流完成之后（否则其上下文仍会冻结半截旧答案）
-- LLM 对话面板风格（Assistant/User Amateur）
-- 工作组重命名/删除：`handleWorkGroupRename`/`handleWorkGroupDelete`（删组连带删组内节点）已实现但**未接线**——WorkGroupSwitcher 仅支持切换/创建，无重命名/删除入口，留待后续
-- tsconfig 未开启 `noUnusedLocals`，死代码需手动核查（建议后续开启使 build 自动报未使用项）
-
-### 已知限制
-
-- `page.tsx` 过长（~1400 行），未来应拆分为 custom hooks 或独立 handler 模块
-- 未做移动端适配
+1. **先探索**：改动 Node/Session/Entry 数据 → 读 [ARCHITECTURE.md](agents/ARCHITECTURE.md)；新增交互 → 核对 [CONVENTIONS.md](agents/CONVENTIONS.md)
+2. **按模块规划**：页面逻辑在 page.tsx，组件在 components/，服务在 services/；小步可逆修改优先于大重构
+3. **安全实现**：严格遵守就地修改 + REPLACE_NODE、TypeScript strict、既有约定；禁止 `as any`/`@ts-ignore`
+4. **非补丁式修复**：修复前先建立"正确行为模型"（预期语义）再沿数据流追根因，区分实现 bug / API 语义不充分 / 设计取舍；调用侧出现 if/补偿/特判逻辑来绕过问题，往往是底层 API 语义没表达充分；若正确行为模型涉及歧义术语或多重解释（如"节点"在树视图与导图视图语义不同），先向用户说明对齐，不自行假设
+5. **本地验证**：按「构建与验证」分层执行——LSP 诊断 → `tsc --noEmit`（秒级）；`npm run build` 仅交付前/涉及打包产物时跑
+6. **闭环**：实现完成后将新增约定/结构变化回写 agents/ 文档
 
 ## 文件索引
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `src/app/page.tsx` | ~1550 | 主组件：全部 handler、状态、事件、快捷键、生命周期、上下文构建、PDF 集成 |
-| `src/components/NodeView.tsx` | ~290 | 主题 Node 包装层 + 递归 Session 树：Node 顶行（+直接建根 Session）、Session/Entry 渲染、折叠/展开、fork、右键菜单、选中高亮、编辑 |
-| `src/components/NodeLibrary.tsx` | ~130 | 节点列表（侧栏）：搜索、增删改、组合视图 +号 |
-| `src/lib/NodeListContext.ts` | ~9 | 节点列表 React Context（`useNodeList`） |
-| `src/components/GuideMapCanvas.tsx` | ~700 | 组合视图：DnD 拖拽组合、面包屑、图节点递归渲染、termCount 保护 |
-| `src/components/InputBar.tsx` | ~100 | tag 驱动输入框 + Ctrl+Enter/Enter 逻辑 |
-| `src/components/SettingsPanel.tsx` | ~530 | 设置 Dialog |
-| `src/components/FilesList.tsx` | ~110 | 文件列表：拖拽上传、搜索、删除、点击打开 PDF |
-| `src/components/PDFViewer.tsx` | ~155 | PDF 阅读器：页码导航、Ctrl+滚轮缩放、文本层、右键聚焦菜单 |
-| `src/components/MarkdownRenderer.tsx` | ~170 | Markdown 渲染，支持文件链接 + 术语占位符解码（`[[术语]]` 不破坏表格/标题等块级结构） |
-| `src/components/TermText.tsx` | ~80 | 术语标注文本渲染（`[[术语]]` 链接/高亮） |
-| `src/components/ContextMenu.tsx` | ~59 | 右键菜单组件（ContextMenu + ContextMenuContent） |
-| `src/components/PlusMenu.tsx` | ~80 | 加号下拉菜单 |
+| `src/app/page.tsx` | ~1680 | 主组件：全部 handler、状态、事件、快捷键、生命周期、上下文构建、PDF 集成 |
+| `src/components/NodeView.tsx` | ~314 | 主题 Node 包装层 + 递归 Session 树：Node 顶行（+直接建根 Session）、Session/Entry 渲染、折叠/展开、fork、右键菜单、选中高亮、编辑 |
+| `src/components/NodeLibrary.tsx` | ~113 | 节点列表（侧栏）：搜索、增删改、组合视图 +号 |
+| `src/lib/NodeListContext.ts` | 9 | 节点列表 React Context（`useNodeList`） |
+| `src/components/GuideMapCanvas.tsx` | ~697 | 组合视图：DnD 拖拽组合、面包屑、图节点递归渲染、termCount 保护 |
+| `src/components/InputBar.tsx` | ~104 | tag 驱动输入框 + Ctrl+Enter/Enter 逻辑 |
+| `src/components/SettingsPanel.tsx` | ~557 | 设置 Dialog |
+| `src/components/FilesList.tsx` | ~115 | 文件列表：拖拽上传、搜索、删除、点击打开 PDF |
+| `src/components/PDFViewer.tsx` | ~172 | PDF 阅读器：页码导航、Ctrl+滚轮缩放、文本层、右键聚焦菜单 |
+| `src/components/MarkdownRenderer.tsx` | ~169 | Markdown 渲染，支持文件链接 + 术语占位符解码（`[[术语]]` 不破坏表格/标题等块级结构） |
+| `src/components/TermText.tsx` | ~44 | 术语标注文本渲染（`[[术语]]` 链接/高亮） |
+| `src/components/HoverPreview.tsx` | ~58 | 术语悬停预览（pointer-events-none 防卡滞） |
+| `src/components/ContextMenu.tsx` | 59 | 右键菜单组件（ContextMenu + ContextMenuContent） |
+| `src/components/PlusMenu.tsx` | ~93 | 加号下拉菜单 |
 | `src/components/ThemeMenu.tsx` | ~97 | 主题菜单：亮/暗/跟随系统三态切换 |
-| `src/components/PreviewPanel.tsx` | ~35 | 右侧树预览面板 |
-| `src/components/Onboarding.tsx` | ~45 | 初始界面（无 Node 时） |
-| `src/store/nodeStore.ts` | ~85 | Node(Session/Entry) reducer + createNode/createSession/createEntry |
-| `src/services/cache.ts` | ~160 | IndexedDB CRUD（nodes + files + work_groups stores）+ migrateData 数据迁移 |
-| `src/services/llm.ts` | ~125 | SSE 流式 LLM 调用（`streamLLM` + `streamLLMChat` 消息数组版） |
-| `src/services/prompts.ts` | ~95 | 预设提示词管理（Default + 4 个微观测度） |
-| `src/services/termParser.ts` | ~50 | 术语占位符编码（`[[术语]]`→私有区字符，避免拆分 markdown 块结构）+ 自由术语匹配 |
-| `src/types/index.ts` | ~80 | 所有类型定义（Node, Session, Entry, GuideMapNode, StoredFile 等） |
-| `src/lib/constants.ts` | ~25 | 预设定义、默认配置 |
-| `src/lib/utils.ts` | ~11 | `cn()` 工具函数 |
+| `src/components/PreviewPanel.tsx` | ~34 | 右侧树预览面板 |
+| `src/components/Onboarding.tsx` | ~57 | 初始界面（无 Node 时） |
+| `src/components/WorkGroupSwitcher.tsx` | ~122 | 工作组切换/创建 |
+| `src/store/nodeStore.ts` | ~69 | Node(Session/Entry) reducer + createNode/createSession/createEntry |
+| `src/store/configStore.ts` | ~54 | Zustand：LLM 配置、预设提示词、加号菜单项 |
+| `src/services/cache.ts` | ~172 | IndexedDB CRUD（nodes + files + work_groups stores）+ migrateData 数据迁移 |
+| `src/services/llm.ts` | ~134 | SSE 流式 LLM 调用（`streamLLM` + `streamLLMChat` 消息数组版） |
+| `src/services/prompts.ts` | ~94 | 预设提示词管理（Default + 4 个微观测度） |
+| `src/services/termParser.ts` | ~51 | 术语占位符编码（`[[术语]]`→私有区字符，避免拆分 markdown 块结构）+ 自由术语匹配 |
+| `src/types/index.ts` | ~82 | 所有类型定义（Node, Session, Entry, GuideMapNode, StoredFile 等） |
+| `src/lib/constants.ts` | ~27 | 预设定义、默认配置 |
+| `src/lib/utils.ts` | 11 | `cn()` 工具函数 |
 
 > 已删除的文件：`TreeNode.tsx`、`RecursiveTree.tsx`、`GuideMap.tsx`、`FootprintPanel.tsx`、`TermLibrary.tsx`（→NodeLibrary）、`TermListContext.ts`（→NodeListContext）、`ViewToggle.tsx`、`treeStore.ts`、`footprintStore.ts`、`useConceptNode.ts`。
 
----
-
-## 用户输入历史
-
-> 来源 session: `ses_061d3accaffe3Iq7FZLtlc7Vn3` — "自用Web原型需求文档审查 (fork #1)"
-> 共 21 轮用户输入，时间跨度 2026-07-24 ~ 2026-07-27
-
-### 第 1 轮
-**我正在尝试开发一个自用web项目原型，请你查看项目中的需求文档**
-
-### 第 2 轮
-**我不建议你读取旧方案，因为我实测存在大量未连接和无效代码，而且界面UI完全没法看**
-
-### 第 3 轮
-**我必须澄清，旧的文档有一些不符合我的想法，简化需求.md是经过我人工验证的**
-
-### 第 4 轮
-**请你搭建，如有问题可向我提问**
-
-### 第 5 轮
-**？已经卡了15分钟了**
-
-### 第 6 轮
-**端口3000被占用了。重新读取一次简化需求.md，简化需求必须完全覆盖，与现有代码冲突的以简化需求为准，重新规划修改开发。**
-- 需求对比：
-  1. 我去掉了足迹的概念，你可以不实现它，或者把它移到面板中
-  2. 我去掉了llm生成导图的功能，而且esc的含义改变了，你检查一下
-- 当前反馈：
-  1. 设置层UI我不喜欢现在点击后放在页面右边展示，能不能放在页面中间展示，阴影可以保留，但浅一点。
-  2. 模型连接问题 `{"timestamp":"...","status":404,"error":"Not Found","path":"/v4/v1/chat/completions"}`
-  3. 知识树视图区域的标题行至少要和左侧栏的标题行一样高吧，不对齐不好看。
-- 你可以先修当前问题，然后解决简化需求与原需求（可能存在的）不一致的问题。在简化需求的实现上，我希望你一定要遵循文档，正确理解，合理设计。有问题向我确认。
-
-### 第 7 轮
-1. 标题行仍未对齐，我觉得是字体大小的问题，它可能自动布局了？
-2. 我觉得设置中的四个tag的字稍微有点小
-3. 好像不需要在设置中管理工作组吧，我感觉没啥用
-4. 现在左边是认知足迹？而且我怎么发现根节点点展开下面的节点是根节点本身，这不对吧。另外需求里说了左边放的是术语列表，你可以把足迹放到panel。反正需求里panel在知识树视图是空的。
-5. 需求里说了tag常驻，默认是追加到根节点。
-6. panel是作为右侧栏常驻的，你似乎没实现
-7. 点击某个提示词模板，并没有在输入框显示文字！
-8. 点击预设的展开，并没有调用成功，只显示红色感叹号，你似乎应该把错误信息打印到控制台。
-9. llm设置，连接成功了，但是点击保存没有反馈
-10. 左侧布局可以稍微再多给一点空间，加入panel时注意左右对称空间
-11. 现在大多数菜单似乎都是全透明衬底？会透出后面的东西，这不对吧。
-
-### 第 8 轮
-1. 左侧术语库中的术语就不需要展开按钮了，需要重命名按钮
-2. 右键选预设模板仍然没有在输入框显示提示词，只是光标出现在了输入框。
-3. 右侧预览面板顶到页面上部，而不是待在标题行下方，直接去掉微观/宏观，同理预览面板标题高度也要对齐
-4. 导图视图部分，我觉得你完全没有理解我简化需求.md中的需求，我建议你重新看看。例如，单击不直接跳转而要显示预览，单击再单击才会跳转。而且拖拽组合相关需求完全没实现。
-5. 左右可以稍微再给一点空间
-6. 当我在根节点悬浮时，为什么没有+号
-7. 左下角的设置图标为什么居中了，原来就挺好的啊
-8. 现在子节点右键菜单怎么是重命名，我要的是编辑，这进一步说明你完全忽略了简化需求.md中的需求，我需要你再次查看它，关注细节交互，对齐设计意图，做更到位的理解。
-9. 例如，你应该去掉菜单中的"添加参考"，因为已经有添加空子节点了。
-10. 节点拖拽问题也没实现，加上4.，拖拽确实是一个复杂的问题，如果你认为的话，我们也可以只先完善基础需求实现。
-
-### 第 9 轮
-1. 布局预览面板，我的意思是左中右三栏，不是现在这样的预览面板放在标题行以下这样，现在标题行占据了中右的位置，我希望预览面板的标题占据右的位置。
-2. 右键子节点，菜单并没有出现在鼠标旁边，而是出现在了左上角
-3. 现在的展开收起逻辑同时管理了内容和节点的子节点，然而当子节点没有子节点时却不显示展开图标
-4. 拖动手柄现在似乎是居中的，不好看，拖动功能并没有实现
-5. 我创建的空节点似乎没有写到树的数据中
-
-### 第 10 轮
-1. 点完子节点右键菜单按钮后，菜单不消失，这不对吧
-2. 根节点的右键重命名改成inline的
-3. 在导图点击节点，预览面板并没有出现它的树状图
-4. 空节点仍然没有持久化，我怀疑添加节点逻辑存在问题
-5. 点击节点的选中高亮可以收缩一点，不占据整行，而是左端收缩到拖拽手柄的位置
-6. 请求超时时间有点短，流式响应正在进行你怎么就超时了
-7. 四个预设在生成完成后，将标题追加到内容首行，以便正确应用截断取标题逻辑
-8. 对知识树的展开状态做运行时记录，每次一切换发现除了动态直觉的全部都折叠了，应当保持切换前的展开/折叠视图状态。
-9. 现在似乎无法划词
-
-### 第 11 轮
-1. 7的修复不对，我的意思是，原来是"看定义"，那就把"看定义"拼接到回答的第一行存储，而不是从回答提取标题。
-2. 内容可以划词了，但是右键菜单呢？
-3. 导图点击预览，右边的知识树预览为什么是纯文本，你至少要给我换个行吧
-4. 5的修复也不对，虽然你加了蓝色竖条，但我要的是左边留一点空，空的大小与子节点自己的缩进相关。
-
-### 第 12 轮
-1. 折叠展开状态还是会随着我切换术语而消失，除非含有子节点，而且有子节点的展开也不对，只展开了子节点，却没有显示内容。
-2. 关于预设标题拼接有个问题，因为流式响应，应该在响应完成做拼接，否则我只有切换术语后才会看到被拼接的标题？
-3. 选中高亮缩进仍然失败，还是从头开始的
-4. 预览面板部分要按树状结构给出，而且加上缩进吧，而且预览只有标题，无需内容，更不需要"微："的前缀
-5. 右键节点的时候也请提供高亮，毕竟右键也算某种选中
-6. tag请根据选中切换，而不仅仅因右键预设切换。
-7. 左右再给一点空间，左侧的术语行高和字体和图标都有点小，中间区域的树子的左右边界可以收缩一点，下方输入框可以做成圆角框，而且不应占满整个中间区域
-8. 预览面板的标题就是预览面板，具体术语放到内容区作为标题
-
-### 第 13 轮
-1. 展开时没有显示内容，只显示了节点，仍然有这个问题
-2. 输入框所在的布局分割线能否去掉，输入框能不能占两行高；另外导图的布局也可以居中一点
-3. 节点删除逻辑未生效
-4. 我需要预览的是树状显示，不是把所有子节点全部放到最后显示。
-5. 请求超时问题仍然存在。
-6. 布局上有很多需要优化的地方，例如整体字体显小，左右布局可以再给一点空间。
-7. 把中间标题行换成工作组名字吧，然后把原来工作组位置换成OmniExplore，原来工作组和搜索框都整体下移
-
-### 第 14 轮
-1. 布局上你似乎遗漏了右上角的预览面板和左下角的设置图标未做相应调整对齐，以及输入框的位置能否稍微往上移一点点，在下方稍微多留一点点空白；现在输入框的圆角太圆了，你改一下，输入框字体稍微改小一点点。
-2. 删除节点依然失败，切换术语回来发现节点还在。
-3. 中间知识树/导图的字体也相应整体稍调大一些，导图居中布局没有实现，两侧需要像知识树视图那样的空白。
-4. 刷新标题的时机应当在拼接之后
-
-### 第 15 轮
-1. 我希望预设四问的提示词也可配置
-2. 预览面板内容字体也相应调大一点吧
-3. 左侧术语区的点击判定区域有点严格
-4. 悬浮在工作组上的高亮阴影没有填满区域，不好看
-5. 标题中的icon似乎无法显示？我点编辑再退出有icon，切一下术语就没了
-6. 导图先不管，知识树的子节点拖拽可以做了吗。有问题向我确认。
-
-### 第 16 轮
-1. 在搜索术语框下增加一个新增术语，点击就是跳转到初始界面
-2. 追加到根节点时似乎会导致独立新建知识树，而非追加到根节点
-3. 除了双击被标注的术语，我希望ctrl+单击也能跳转聚焦
-4. 维护跳转路径，增加返回/前进按钮，或alt+左/右导航
-
-### 第 17 轮
-1. 注意术语库是跟着工作区走的，当切换工作区也要切换术语库，同时要刷新右侧的预览面板
-2. 无论是左侧术语库的术语删除，还是设置中的术语库删除，请都加入二次确认
-3. 设置中的预设提示词，至少要让我在编辑时能看到默认提示词吧
-4. 把创建空子节点移到菜单的第一位吧
-
-### 第 18 轮
-1. 设置中的术语库是全部术语库，现在是这样吗
-2. 右键被标记词的菜单中，"追问"并没有作用，可去掉
-3. 当术语从自己跳转到自己时，会错误地在路径中重复记录
-4. 当编辑了预设提示词后，预览的一行过长会导致框超出设置层区域边界
-5. 当创建根节点时，应同时在导图中加入图节点
-6. 提问模板中的{term}可以改成${term}。有问题向我确认。
-
-### 第 19 轮
-1. 当跨工作区时注意导航路径不要串台！各自维护。
-2. 当我试图删除一个术语，点击确认后会再次弹窗要确认两次？
-3. 有拖拽手柄的子节点，和没有拖拽手柄的预设节点应该在"展开/收起"按钮对齐，而不是简单的对齐，否则会导致缩进观感混乱，因此要给预设节点也加上拖拽手柄
-4. 在导图视图，tag应该变成"在当前图层新增根节点"；我新建了术语，但导图并没有添加它
-5. 预览面板现在只会在图节点被点击时触发生效，能否在跳转时也刷新它。若有问题先确认。
-
-### 第 20 轮
-1. 新建模板提示词也改成{term}->${term}
-2. 导图中的新图节点默认挂载到了先存在的节点下，不符合预期，应当平级
-3. 导图视图tag，"追加到"的前缀依然存在，不合预期
-4. 初始界面，左侧加载默认工作组的术语库，而不是选择了默认才会加载。
-5. 预览面板提示语修改："按Esc进入导图视图，点击节点 📋 图标查看详情"。有问题先问我。
-
-### 第 21 轮
-**完善gitignore**
-
----
-> 来源 session: `ses_04b4dc027ffegAMwvkFrGgkIAu` — "自用Web原型需求文档审查 (fork #1)"
-> 共 43 轮用户输入，时间跨度 2026-07-31
-
-### 第 22 轮
-**继续开发
-- 我之前让你去掉了划词右键里的"追问"只剩"聚焦"，现在突然发现前者是有用的，就是将所划部分写到输入框并加个"？"（类似节点新增操作中的"${term}是什么"），并注意改变tag**
-
-### 第 23 轮
-**你为何每次修改后都build，小修改有必要吗**
-
-### 第 24 轮
-**1. 聚焦放最前面
-2. 后面三个问题你照搬了，但我想改一下：它拥有也可独立配置的菜单，在菜单配置中，一个可能的问题是，"这里的${selected}指什么"；问题要有和追问一致的图标；我想调整一下，用${root}指代根节点，用${selected}指代被划的；
-3. 可以做markdown公式渲染吗**
-
-### 第 25 轮
-**1. 上下文是怎么包装的，这个也能配置吗
-2. 现在的前进/返回，能不能各在旁边加一个下拉按钮，以实现多步回退？
-3. markdown可以做**
-
-### 第 26 轮
-**1. 当点击完成后应自动收起菜单；而且注意一个节点不要重复出现，比如A,B,C,A,那这时返回列表中是C,B，不要A
-2. markdown渲染似乎会在[[]]前后添加换行？请去掉这个换行。
-3. 我之前指的是，自定义追问有system提示吗，如何传递节点树上下文的，是不是也应做成可配置的
-4. 你说的hoverpreview是什么，现在有实现吗，我悬浮在已聚焦且被标注的术语上并未显示preview，这个功能似乎并未实装？
-5. 右键被标注的术语的菜单应与划词右键菜单一致。**
-
-### 第 27 轮
-**1. 导航重复问题仍然存在
-2. 追问提示词可放在划词菜单中
-3. "菜单模板"改名为"新建菜单"，"配置 + 菜单中的追问模板。$${term} 占位符在运行时替换为节点名称。"中$重复了。
-4. hover仍无效，我对hover有误解吗，不是在[[]]上的hover吗
-5. 导图的图视图可以做吗**
-
-### 第 28 轮
-**1. 我就是未触发悬浮，你告诉我我如何触发它？
-2. 我正在规划pdf等文件的导入，但是没想好如何设计**
-
-### 第 29 轮
-**1. 我悬浮在一个已聚焦术语上时，鼠标指针已经变为可跳转状态，双击也可以跳转，就是没看到悬浮
-2. 应该更像B，但是AC也能做，就是一个反向链接的事吧，但是我其实更希望是用户从划词创建术语，LLM划得太多了，不精确，OmniExplore可以存在为论文伴读的形式吗，怎么设计**
-
-### 第 30 轮
-**1. 为什么只有一句点击展开查看详情，这算什么预览，内容呢，而且没必要重复一遍词本身吧，而且不应该写双击吗
-2. 我发现我划词聚焦后，源文本中的术语并没有被自动加上[[]]，现在的逻辑是纯依赖LLM标注而非术语库解析标注吗？
-3. 难点在于，如何处理知识树视图和pdf预览的呈现**
-
-### 第 31 轮
-**1. 现在预览框没了，是不是提取术语的内容的方式出问题了
-2. 难道不应该这样吗，有没有更快的设计，可以做成惰性的，当词库更新过，且某一段被呈现时if in 词库就标注。**
-
-### 第 32 轮
-**我有一个问题，你为什么pass termlist，而不是直接OnDisplay检查全局的术语库呢，因为变量获取不到吗**
-
-### 第 33 轮
-**1. 悬浮仍然失败，没有东西出现**
-
-### 第 34 轮
-**1. 现在悬浮框是有了，但是问题是preview为什么总是空的
-2. 限制悬浮框只展示一行的字**
-
-### 第 35 轮
-**3. 离开后到消失的延迟太长了
-4. 仍然没有预览内容，仍然显示了两行内容
-5. 每次小的修复后为什么都要build？**
-
-### 第 36 轮
-**现在有预览了，但是现在只要鼠标离开划词后经过悬浮框，那它就无法消失。
-展示时截断前五个字符吧，都是重复的**
-
-### 第 37 轮
-**1. 很好，接下来不管悬浮了，已经基本完成了
-2. 我意识到一个问题，在追问时，没有传入除了根节点以外的上下文，怎么办
-3. 现在的左中右的分割线能做成可在一定范围拖拽的吗，左侧栏最好在标题行右放一个侧栏图标，点击就会收起，只展示一个图标，再次点击就会恢复，在中间栏标题栏右放一个右侧栏图标，控制右侧栏的收起与否；这样的话，注意自适应...显示 和 框的自适应布局， 中间区域注意保持内容居中。
-4. pdf论文的话，可以让预览面板占据整个右半区域，在预览面板展示pdf
-5. 我其实还没做好引入pdf的打算，包括如何导入，如何预览都还要设计，所以4可以先保留，先做导图B.完整图形DnD对齐原始需求怎么样
-6. 有问题随时确认**
-
-### 第 38 轮
-**1. 打勾没必要出现吧，不知道要传递什么含义
-2. 蓝色框应该跟着鼠标点击走吧，当前所处的术语这一信息已经有蓝色圆点表示了
-3. 增加拖拽到空白处，可以重排序或者改变归属关系的功能
-4. 现在拖拽组合的逻辑似乎并不正确
-4.1 子卡片拖拽到其他卡片，会连带着父卡片一起过去
-4.2 当子卡片拖到自己原来的位置，导致父卡片被删除
-5. " ancestors"参数？为什么我看到的还是"你是认知解释专家。用户对父概念'${parentTerm}'中的一个子概念产生疑问。请用通俗易懂的语言解释，注意在父概念语境下。遵循以下规则：1. 结合父概念'${parentTerm}'的语境，解释'${childTerm}'在这个上下文中的含义2. 用日常类比，让外行也能理解3. 回答控制在 150 字以内"这段？
-6. 侧栏的可拖拽分割线有问题，移动速度与鼠标不匹配
-7. 侧栏图标换一个，不是很经典，大概是一个圆角方向中心偏左侧有一条竖线，然后右边放的图标就是右侧竖线
-8. 现在的esc是切换的逻辑，但是我要的是defocus，除非已经在最外层了。
-9. 拖动效果有点奇怪，白色框跟着鼠标走，但是底下虚影框会有延迟
-10. 在预览面板似乎无须标注术语，因为双击跳转效果和预览效果在那里并没有生效。**
-
-### 第 39 轮
-**1. a，b都在c中，a移入b，b再移入a会导致b消失
-2. 拖到空白取消归属没有实现
-3. 预览面板的术语标注依旧存在
-4. 重置一下图节点，因为各种操作导致很多不显示或被删除了
-5. 侧栏图标不合预期，换一个
-6. 在导图视图 "追加到"的tag前缀不应显示
-7. 在某一个图路径进入根节点，按esc也应回到这一层，而不是默认地回到根层
-8. 现在根节点需要三击才能进入，因为第一次是点击选择，第二次双击才进去，改成选中时只要单击就能进去
-9. 当点击子卡片，蓝框不会收缩选到子卡片，而是其父卡片**
-
-### 第 40 轮
-**1. 仍然会出现莫名奇妙的消失，而且错误地禁止了把子节点拖到祖父节点以使其与父节点并列的操作
-2. 仍未实现
-3. ok
-4. 不合预期，是重置为所有节点都平铺，不是全部删掉
-5. 侧栏图标 svg 代码（圆角矩形+竖线）
-6. ok
-7. ok
-8. 不成功，双击仍然不能让我进入
-9. 我发现父卡片没有灰色高亮，并且点击子卡片也没出现蓝框**
-
-### 第 41 轮
-**1. 我认为你混淆了图节点和根节点，图节点没有根节点对应，根节点不允许包含根节点
-2. 仍未实现，我不理解
-4. 是把工作组中的若干个节点加进来，而非把现有图结构平铺，我的意思是因为之前的bug现在图里啥节点都没了
-5. 展开为什么是竖线在右，收起展开是一个图标，但是右侧的才是竖线在右
-8. 我认为是1.的理解的问题，因为双击确实可以focus一个图节点，但却无法focus进入根节点
-10. 我发现输入框当前节点添加根节点并未生效**
-
-### 第 42 轮
-**1. 导图难道不是全局的吗，怎么我在不同的地方按esc还会遇到截然不同的导图，特别是当我构筑了层级之后
-2. 空区域仍然无法接收？？已经很多轮了，重点排查这个问题，可以加调试信息
-5. 不用加箭头，展开/收起用一样的就行
-10. 要不改成新增图节点吧
-11. 注意当术语删除时导图中的术语也要删
-12. 当两个根节点被组合时，A被拖到B，使用B作为大组名
-13. 图节点中的根节点会有删除按钮，但是最外面的根节点却没有**
-
-### 第 43 轮
-**2. 我没看到任何信息
-12. 但是导致了根和图都标上了蓝色圆点，应该仅根
-13. 应该是所有根节点都不可删除？删除图节点会导致根节点回归上一层
-14. 重建不该是全局重建，当我在某个图路径下时，仅当前图下的节点平铺
-15. 点击新建的+号出现的框不输入点其他地方，框不会自动消失，以及根节点不应该有+号**
-
-### 第 44 轮
-**2. 我没看到信息，你随便输出一段测试信息试试
-13. 图节点内的根节点仍出现删除按钮
-14. 非空也错误地重建了全量**
-
-### 第 45 轮
-**2. 拖到空白处会显示null，so what
-13. 对了因为之前的错误有些节点重复出现了，我又有想法了，让根节点可以出现在多个图中怎么样？但是这样esc就不知道去哪个图了？而且现在也没有删根节点的操作（被我要求去掉了）？咋办，讨论一下？
-而且现在的esc似乎仍是默认到根图，而不是回到进入时的路径
-14. 展平没有即时刷新，而且会错误地把图节点当成根节点加到展平的列表中
-15. 拖动以给节点排序好像很难做？**
-
-### 第 46 轮
-**2. Unhandled Runtime Error
-ReferenceError: Cannot access 'sourcePath' before initialization
-13. 引用模型吧，导航为何不唯一，就是从什么路径进入，回到什么路径的图视图，等会再开工
-15. 确实复杂，那搁置**
-
-### 第 47 轮
-**13. 现在esc逻辑不太对吧，我从根，聚焦A，进入B，按esc也要回到聚焦A的状态，对，就是你说的那样的问题
-14. 重建展平没有刷新**
-
-### 第 48 轮
-**从TODO中删掉两项已讨论内容
-13. 我猜你可能没理解我，我是指从某个路径（根>A>B），聚焦根节点进入树视图，此时按esc，应对回到之前路径的图视图，而非回到根视图。
-15. 另外我注意到鼠标放到某个图节点上时，它的所有子节点都会展示按钮，不太对吧
-16. 导图层的左上的返回按钮是直接返回树视图，而右上的逻辑返回是返回上层，根则回到树视图，直接把右上的放左上，左上那个不要了，注意补图标，包括"重建"**
-
-### 第 49 轮
-**13. 没有成功，还是回到了根
-15. 无论是否应该出现按钮，移到按钮本该在的位置指针会变也有效果，按钮全不见了
-16. 有点小，重建放右上边，也是图标+字**
-
-### 第 50 轮
-**13. 依旧失败
-15. 如果按完esc就处在一个图节点内，那么按钮不会显示，直到下一次鼠标离开进入
-16. 重建错误地出现到了左下角？？
-17. 你不应该用有无子节点判断图节点吧，允许空组**
-
-### 第 51 轮
-**13. 但是现在出现新问题，我点返回上层又被强行拉回来
-15. 我的意思是，卡片刷新完成后没有检查鼠标是否在里面
-16. "上 层"间不要有空格，重建依旧在左下角？？**
-
-### 第 52 轮
-**很好，13终于解决了，15也做得很好
-2. 我在某路径图视图下拖放到null，错误地被移到了根节点，而不是当前聚焦的子图
-16. 右上正确地出现了重建，左下和右下不该出现重建
-17. 当一个组空时，还是会被错误地当成根节点
-18. 虽然正在考虑根节点可以重复出现，但完全等价的位置应该去重；**
-
-### 第 53 轮
-**2. 问题仍存在，以及新问题：当越级聚焦（双击嵌套的子图节点）时，只会添加一层子图路径
-16. 仍存在
-17. 空组名字不变，显示的时候后面加个（空）
-18. 未生效
-19. 点击空白处取消蓝框选中**
-
-### 第 54 轮
-**2. drop似乎是错误地移到了预期的上一级？多级聚焦只显示<却没显示组名
-17. 不空的怎么也显示了（空）？难道因为组名为空吗，不是说组名自动用被拖到的那个吗
-18. 我怀疑是不是和根节点不可删除的逻辑冲突了，
-19. selectedPath？我怀疑canvas点击不到，总之我点空白蓝框没有消失**
-
-### 第 55 轮
-**2. 聚焦根>A中的B，我为什么esc返回到了根>A>A
-17. 通过拖拽产生的图节点的组名不该是空的，虽然视觉上显示的是正确的
-18. 你删了个啥，检测重复逻辑未生效是不是因为它不管2.的drop？
-19. 仍无效，之前检测drop到null不是挺好的吗，怎么点击null仍不对**
-
-### 第 56 轮
-**13. 可能还是有问题，我觉得我说的已经很明确了，怎么进树视图怎么出，如果是从根图进的，也要覆盖进入路径，根图进根节点哪怕是越级也并非例外
-18. 当我在根图拖动一个根节点到空白，我希望先检查有无同名根节点，有就只保留一个；我不是叫你删，你给我搞回来，我之前的意思是问题不在此。
-20. 按esc的defocus应是沿着面包屑路径一层层退出的
-21. 还是给导图的根节点也加上删除吧**
-
-### 第 57 轮
-**18. 跳过不对，被操作的那个应删除
-19. 我试了一下，发现点击只有一部分区域可以（从卡片最下端到多几行的空间）
-22. 根>可以常驻显示，无需因为只是根而不显示**
-
-### 第 58 轮
-**19. 仍不行，检测一个点击事件这么困难吗，是不是被阻断了？
-23. 根节点应不可重命名**
-
-### 第 59 轮
-**19. 点到中间区域就算deselect，不一定在canvas内？**
-
-### 第 60 轮
-**不，现在并非整个中间区域都生效，可能被导图范围局限了**
-
-### 第 61 轮
-**没成功，或许需要比scroll area更大**
-
-### 第 62 轮
-**现在的逻辑怎么是行列某行没卡片才会deselect**
-
-### 第 63 轮
-**未奏效**
-
-### 第 64 轮
-**节点确实不占据整行碰撞了，但是列上会占据所在行最长的碰撞，这不对**
-
----
-
-> 来源 session: 本轮会话 — "继续开发：侧栏拖拽/动画/导图+号/导航历史"
-> 共 18 轮用户输入，时间跨度 2026-08-01
-
-## 压缩总结
-
-### 目标
-开发 OmniExplore 导图导航、侧栏拖拽、面包屑显示、以及树视图与导图视图间的历史（前进/返回）集成。
-
-### 关键实现细节
-- `focusPath` = 从虚拟根开始的索引数组，如 `[0,1]` = `root.children[0].children[1]`
-- `guideFocusPath`：导图中当前聚焦图层（state）；用于 ESC 返回 + 面包屑显示 + `initialFocusPath` prop
-- `navHistory`：`NavEntry[]` 联合类型（`{type:"tree", term}` | `{type:"guideMap", pathStr, focusPath}`）
-- `navIndexRef` 通过 `useEffect` 同步以避免 `handleGuideMapNavigate` 中的过期闭包
-- `navPushedRef`：在 `setNavHistory` 更新器内部设置的标志；`setNavIndex` 仅在历史确实增长时递增（去重会阻止）
-- `buildBreadcrumbItems(guideMap, focusPath)` 从 `GuideMapCanvas.tsx` 导出 → 返回 `{label, path}[]`，在树视图面包屑栏和导图头部中复用
-- `onNodeClick` 签名改为 `(term: string, nodePath?: NodePath)` 以传递叶子节点的完整树路径
-- 双击嵌套叶子节点：`guideFocusPath`/树面包屑设置为 `nodePath.slice(0,-1)`（父级组）
-- 树面包屑 CSS 与导图头部匹配：按钮容器 `text-sm`，图标 `w-4 h-4`，文本 span `text-xs`，面包屑按钮 `px-1 py-0.5 rounded`
-- 拖拽调整大小：绝对位置跟踪（`startX + startW`），限制最小/最大值，`isResizing` 状态在拖拽期间禁用 CSS transition
-- 侧栏折叠动画：侧栏/面板上的 `transition-[width] duration-300`，通过 `!isResizing &&` 守卫禁用
-
-### 已完成
-- 调整大小处理器：绝对位置（startX + startWidth），无增量累积
-- 侧栏折叠/展开滑动动画，带 `isResizing` 守卫
-- TermLibrary `showGuideMap` + `onAddToGuideMap`：悬停 + 按钮将术语添加到当前 focusPath 层级
-- 导航历史：`NavEntry` 联合类型，`handleGuideMapNavigate`，前进/返回下拉菜单 + Alt+←/→ 同时处理两种条目类型
-- `navEntryEq` null 守卫（`!a || !b`）
-- 从导图根层按 ESC → `onBack` 从 IndexedDB 刷新预览面板内容为树根内容
-- `focusPath` 验证效果：当 `guideMap` 变化时，从 `focusPath` 回退直到找到有效节点
-- 树视图面包屑栏位于头部和内容之间："组合"按钮 + `根 > … > rootTerm` 路径
-- `guideFocusRef` → `guideFocusPath` state；GuideMapCanvas `initialFocusPath` 效果响应后续变化
-- `skipNavRef` → `focusPathRef` + 数组比较以防止内部导航触发伪 `onNavigate`
-- `handleGuideMapNavigate` 使用 `navIndexRef`（非闭包）进行去重切片
-- `navPushedRef` 模式应用于所有三个导航推送点（ESC 处理器、`handleFocusTerm`、`handleGuideMapNavigate`）
-- `onNodeClick` 传递 `nodePath`；双击叶子节点设置 `guideFocusPath = nodePath.slice(0,-1)` 以正确 ESC 返回
-- `treeEntryFocusPath` 合并到 `guideFocusPath`（消除重复状态）
-- `buildBreadcrumbItems` 导出并在 page.tsx 树面包屑中复用
-- 行高对齐：按钮容器 `text-sm` + span `text-xs` 模式匹配导图头部
-
-### 搁置
-- 前进/返回导航（第 83 轮决定暂搁置）
-
-### 下一动作
-1. 测试完整流程：根层 → 嵌套叶子节点双击 → 树视图面包屑 → ESC 返回 → 验证是否正确回到导图层
-2. 测试前进/返回下拉菜单（混合树形+导图条目）
-3. 验证 Alt+←/→ 不再崩溃
-
-### 相关文件
-- `src/app/page.tsx` — 主要集成：NavEntry 类型、调整大小处理器、树面包屑栏、所有导航处理器、导图属性
-- `src/components/GuideMapCanvas.tsx` — 可视化拖拽导图：`buildBreadcrumbItems` 导出、带 nodePath 的 `onNodeClick`、focusPath 验证效果、带 focusPath 比较的 `initialFocusPath` 效果
-- `src/components/TermLibrary.tsx` — `showGuideMap`/`onAddToGuideMap` 属性、悬停 + 按钮
-- `src/types/index.ts` — 带 `_group?: boolean` 的 `GuideMapNode`
-
-### 第 65 轮
-**我们继续开发
-1. 拖拉侧栏分割线的逻辑不对，当鼠标超过界限时不调整是对的，但只有鼠标回到界限才继续调整，不然导致鼠标与分割线分离了
-2. 能不能为收起/展开加个简单滑动动画
-3. 左侧栏的术语在导图视图时加个+号，以便在当前图层添加根节点
-4. 回退/前进列表加入导图视图（所在图层）
-动手前可先向我确认细节**
-
-### 第 66 轮
-**1. 对
-2. 对，就是更实际的做法
-3. hover，根图层？比如现在路径是根>A>B那就添加到B，这个意思
-4. 标识就用"根>A>B"这样的路径吧，不会有过程性的条目，从树到导图再后退，会回到树
-从"根>A>B"进入"根>A"那后退就是回到"根>A>B"**
-
-### 第 67 轮
-**1. 我不明白，当我试图进入导图视图时出现了问题
-Application error: a client-side exception has occurred...
-TypeError: Cannot read properties of undefined (reading 'type')**
-
-### 第 68 轮
-**1. 退出导图视图进入树视图时，预览面板展示的节点也要改变，由于我们引入了图节点，理论上应该考虑图节点的预览，但暂时不管吧，我没有好的想法
-2. 点返回列表中的一个图路径后，应当将它以后+点击前的状态移到重建，它以前不动，它自己则去掉
-3. 导图视图的标题栏，在树视图下也做一个？还是控制它在树视图下也能显示，左上"返回"变成"组合"，右上重建则去掉，保留路径显示（最后一级是>根节点）
-4. 当导图被编辑后，路径会存在错误，怎么办？**
-
-### 第 69 轮
-**2. 我发现在导图视图下，点击回退列表不会生效
-3. 你把它放到中心区域的大标题栏了，这是不合预期的，要在导图视图那一次标题栏的原位**
-
-### 第 70 轮
-**2. "点返回列表中的一个图路径后，应当将它以后+点击前的状态移到重建，它以前不动，它自己则去掉"我测试发现这部分逻辑并没有被实现
-3. 两行标题行并没有做到一样高，好像树视图的小一点
-注意虽然我在根节点越级A进入了B，但是显示在树视图标题行的应是根>A>B，而非根>B；**
-
-### 第 71 轮
-**2 当前状态为根时，会错误地在回退列表中出现根，我怀疑我在导图根图状态下仍然看到导图根图出现在回退列表里的原因是可能根刷新了一遍而入表时没去重，只是猜测；"点返回列表中的一个图路径后，应当将它以后+点击前的状态移到重建"仍未被实现
-2b 根本原因是否是从根图直接发起的跳转，被错误地当作了空路径，未能覆盖存储的path
-3a 依旧没能对齐
-3b 我还以为是越级聚焦的问题，没想到连逐层进入，路径也缺少了中间层级，这个问题没修对
-新问题：按下alt+左触发了Unhandled Runtime Error
-TypeError: Cannot read properties of undefined (reading 'type')**
-
-### 第 72 轮
-**3b 我觉得你混淆了显示路径和esc回退路径，是这样吗，谈谈你的理解，前者展示完整路径，后者会保存具体是从哪里越级聚焦而来的；而且你现在的esc回退路径似乎仍有问题，能不能简单说下现在的逻辑，我review一下
-3a 可能是iconsize不同的原因，未对齐
-如有不理解向我提问细节**
-
-### 第 73 轮
-**focusPath=[0,1]什么意思**
-
-### 第 74 轮
-**icon是对齐了，但你不该连着字也放大了，原来字已经对上了**
-
-### 第 75 轮
-**为我解释focusPath何时更新
-虽然我是从根越级聚焦到B，你现在错误地把根>B作为了显示路径，是不是应逐层拼接父节点？**
-
-### 第 76 轮
-**越级聚焦是 在根图层直接看到了 组A 中的 术语B，因为会嵌套显示
-所以我所谓越级聚焦实际没发生focuspath更新才出的bug**
-
-### 第 77 轮
-**现在显示路径对了，但是esc不对，你确定我越级跳转时的所在图层信息被保存了吗
-行高仍然不一致，而且树视图的面包屑不可点击跳转**
-
-### 第 78 轮
-**guideFocusPath 和 treeEntryFocusPath有什么区别吗
-好吧。。但是为什么不复用图视图面包屑的代码**
-
-### 第 79 轮
-**现在对齐了，但是"组合"二字看着更大了**
-
-### 第 80 轮
-**不对，sm是对的，改回去，不然行高又不对了
-但组合二字不该是w-4，你对照一下返回那边咋写的**
-
-### 第 81 轮
-**奇怪，现在行高又对不上了**
-
-### 第 82 轮
-**把本次session所有新增用户输入写入AGENT.md**
-
-### 第 83 轮
-**关于前进/返回导航那块我决定暂时搁置，而不是已完成。
-合并到agent.md**
-
----
-
-> 来源 session: 本轮会话 — "PDF 集成 + 拖拽排序 + UI 统一"
-> 共 50+ 轮用户输入，时间跨度 2026-08-01 ~ 2026-08-05
-
-### 第 84 轮
-**好，我们继续吧，接下来考虑pdf部分，你有什么建议吗**
-
-### 第 85 轮
-论文伴读、IndexedDB 存储、MVP 先做上传→渲染→划词；讨论 PDF 与知识树的关联方式
-
-### 第 86 轮
-选择方案 A（挂载到根节点）、但进一步提出：pdf 可上传作为文件管理，和术语并列但是放在文件夹里，挂载它只需要在子节点中使用 markdown 的链接语法
-
-### 第 87 轮
-MVP 优先级：文件管理 → 链接渲染 → PDF 查看；选择 Tab 切换侧栏（术语 | 文件）
-
-### 第 88 轮
-文件如何布局管理上传，做成类似于 Overleaf 风格；列出若干 bug 和新功能需求：空节点编辑无法保存、导图输入框添加无效、侧栏收起动画、双击编辑、拖拽排序、PDF 面板行为、LLM 对话功能
-
-### 第 89 轮
-先修 bug 再测试，再继续 PDF；LLM 对话加入未来规划
-
-### 第 90 轮
-**关于前进/返回导航那块我决定暂时搁置，而不是已完成。合并到agent.md**
-
-### 第 91 轮
-bug #2 空节点编辑不保存；bug #3 导图添加节点无效；bug #5 侧栏收起/展开动画
-
-### 第 92 轮
-bug #3 目标已存在时做 toast 提示
-
-### 第 93 轮
-#6 拖拽排序/展平讨论：归层+重排+展平统一，蓝色指示线 + 节点高亮
-
-### 第 94 轮
-展平不用单独做——蓝线本身能表达；开始实现拖拽排序
-
-### 第 95 轮
-实现后反馈：蓝色线只出现在根节点下方，拖到节点上无事发生；before/after 设计讨论
-
-### 第 96 轮
-改用间隙检测替代三区比例——解决子节点展开内容导致"下半区"位置错误
-
-### 第 97 轮
-只有拖到节点上才生效移动逻辑，蓝线时不生效
-
-### 第 98 轮
-发现 `tParentId: null`——预设节点的 `parentId` 未设，修复 `buildPresetChildren` 加 `parentId: "root"`
-
-### 第 99 轮
-两相邻折叠节点间无法放到二者间——加 6px 容差带
-
-### 第 100 轮
-拖拽判定用浮层中心而非鼠标位置——改用 `activatorEvent.clientY + delta.y`
-
-### 第 101 轮
-展开/收起 icon 位置未对齐——占位符 `w-[15px]` → `w-3`(12px)
-
-### 第 102 轮
-创建 FilesList 组件、IndexedDB files store、左侧 tab 切换（📋 术语 | 📁 文件）
-
-### 第 103 轮
-tab 样式调整：纯文字、左对齐、无图标分隔线、放在搜索框下
-
-### 第 104 轮
-搜索框复用 TermLibrary 样式、新建术语按钮保留、tab 改小加粗
-
-### 第 105 轮
-PDF 渲染器：pdfjs-dist 集成、文本层、Ctrl+滚轮缩放
-
-### 第 106 轮
-canvas 重复渲染错误 + topLevelAwait 警告修复
-
-### 第 107 轮
-PDF 标题行高对齐、预览面板范围调整
-
-### 第 108 轮
-复用 PreviewPanel 外壳——竖线+"预览面板"标题；PDF 文件名显示在标题行
-
-### 第 109 轮
-Ctrl+滚轮改为中心缩放；添加文本层叠支持划词
-
-### 第 110 轮
-文本层与缩放不兼容——不用 TextLayerBuilder，改手动 `convertToViewportPoint` 定位
-
-### 第 111 轮
-按行分组渲染 → 空格宽度仍不对 → 回绝对定位 + 显式宽度 + `text-align-last: justify`
-
-### 第 112 轮
-接入划词右键菜单聚焦逻辑；Markdown 链接 `[text](./files/xxx.pdf)` 点击打开 PDF；点击 PDF 文件自动聚焦绑定节点
-
-### 第 113 轮
-Markdown 链接被 termParser 拆散——`matchFreeTerms` 跳过 `[text](url)` 区域
-
-### 第 114 轮
-根节点重命名保存 + 双击整行编辑 + 导图注册
-
-### 第 115 轮
-根节点改名未同步 IndexedDB key + 术语删除不刷新；pdfjs topLevelAwait 警告
-
-### 第 116 轮
-导图新增逻辑改为不包图层、图标区分组/节点、ensureGuideMap 自动补全缺失根术语
-
-### 第 117 轮
-三视图同步修复表：A 改名/B 删除/C 创建——更新 rootTerm、preview、guide_map、breadcrumb、termList
-
-### 第 118 轮
-导图保护改按全图 term 出现次数（非分组内）；PDF 绑定检测改用 IndexedDB
-
-### 第 119 轮
-创建绑定节点按钮隐藏/显示逻辑修复
-
-### 第 120 轮
-导图视图新建术语直接跳回初始界面 + 清空 tag；初始视图点 PDF 自动聚焦；PDF 关闭宽度复原不覆盖
-
-### 第 121 轮
-绑定改用 localStorage `pdf_bindings` 持久化；改名/删除同步更新
-
-### 第 122 轮
-`handleRenameSubmit` 闭包过期——`pdfBoundTerm` 不在 deps 里，改用 ref
-
-### 第 123 轮
-UI 文字统一：术语→节点，导图→组合，图层→层级
-
----
-
-> 来源 session: 本轮会话 — "数据模型重构收尾 + 上下文传递 + 命名统一 + 死代码清理"
-> 时间跨度 2026-08-13
-
-## 压缩总结
-
-### 目标
-完成 ConceptNode 树 → Node:Session/Entry 相互归纳结构的数据模型重构收尾，修正命名（session→node），实现 LLM 上下文链式传递，清理全部旧系统死代码。
-
-### 关键重构
-
-**1. 命名统一（session → node）**
-- `nodeStore`：`SessionState→NodeState`、`sessionReducer→nodeReducer`、`getInitialSessionState→getInitialNodeState`
-- `page.tsx`：`sessionState→nodeState`、`dispatchSession→dispatchNode`、`sessionRef→nodeRef`、`sessionList→nodeList`、`handleCreateSession→handleFocusNode`、`handleSessionContextMenu→handleNodeContextMenu` 等全部连锁重命名
-- 文件：`TermLibrary.tsx→NodeLibrary.tsx`、`TermListContext.ts→NodeListContext.ts`
-- 保留 "term" 语义的文本层：`TermText.tsx`、`termParser.ts`、`onTermDoubleClick/Hover/Leave`（术语标注渲染，非节点管理）
-
-**2. 删除旧系统（~3000 行）**
-- 死文件：`TreeNode.tsx`、`RecursiveTree.tsx`、`GuideMap.tsx`、`FootprintPanel.tsx`、`HoverPreview.tsx`、`ViewToggle.tsx`、`treeStore.ts`、`footprintStore.ts`、`useConceptNode.ts`
-- 死类型：`ViewMode`、`TreeNodeData`、`ConceptNode`、`CustomQA`、`PresetChildDef`、`InputMode`、`PathNode`、`CognitionPath`
-- 死导出：prompts.ts 8 函数（macro 维度 + getPresetPrompt/inquiryPrompt 等）、utils.ts `extractTitle/truncate`、termParser `annotateTerms`、ContextMenu 3 工厂函数
-- IndexedDB：删除 `concept_nodes` store，`sessions` store 只存根 Session（子 Session 仅嵌套）
-
-**3. LLM 上下文链式传递（核心功能补齐）**
-- `streamLLMChat(config, messages[])`：消息数组版流式（替代单 system+user）
-- 消息构建：system 提示词一次 → fork 祖先链（沿 parentSessionId 上溯，每层 entries 取到 fork 点，fork 边界标记插每层 entries 前）→ 当前 Session 前序 entries → 当前输入
-- fork 点定位：`parent.entries.findIndex(e => e.children.some(c => c.id === cursor.id))`，只取 fork 点及之前的 entries
-- `note` entry 作 `[笔记] xxx` user 消息
-
-**4. 流式响应修复**
-- `SET_STREAMING_CONTENT`：累积式设值（`assistantOutput = accumulated`），替代 `APPEND_STREAMING` 增量追加，消除 SSE 重复
-- `streamingAbortRef`：AbortController，新流启动 abort 旧流
-- entry 创建时 `expanded = true`（否则流式过程折叠只有转圈）
-
-**5. targetNodeRef 引用过时修复（关键 bug）**
-- 问题：`REPLACE_SESSION` 用 `{ ...root }` 浅拷贝创建新对象，`targetNodeRef` 存对象引用会过时 → mutate 旧对象 + dispatch 新对象 = 数据丢失（note 333 丢失、子 Session 被当根渲染）
-- 修复：`targetNodeRef → targetNodeIdRef`（存 Session ID），新增 `findSessionInTree(id)` 在 nodeRef.current 最新树里定位对象
-- 所有 handler 的 `REPLACE_SESSION` 统一 dispatch 根 session（`nodeRef.current!`），`putSession` 统一持久化根 session（子 Session 嵌套，不单独存）
-
-**6. 交互细节**
-- Session 点击选中高亮（`selectedSession`）+ 改 tag + `targetNodeIdRef`，与 Entry 选中互斥
-- 仅末位未响应 entry 可编辑（`isEditable = isLast && !assistantOutput`）
-- Escape 编辑取消（快照还原）、onBlur 保存
-- fork 命名 `(分支#N)` 顺序编号，fork 后自动展开
-- 缩进修复：`depth * 20` → `depth > 0 ? 20 : 0`（消除深层级翻倍）
-- 复制 entry 拼接 userInput + assistantOutput；assistant 前加 🤖 图标
-- 根 session 也自动展开 entry 显示流式内容
-
-### 数据流语义（最终确定）
-
-```
-nodeState.session  = 根 Session（永远）→ 中央 NodeView 递归渲染
-entry.children[]   = 子 Session（对象引用）→ NodeView 递归
-targetNodeIdRef    = 输入目标 Session ID → findSessionInTree 定位最新对象
-REPLACE_SESSION    = 总是 { ...nodeRef.current! }（根 session 浅拷贝触发重渲染）
-putSession         = 总是持久化根 session（子 session 嵌套其中）
-getAllSessions     = 过滤 parentSessionId + groupId，只返回当前工作组的根 session
-```
+## 关键规则
+
+- TypeScript strict —— 禁止 `as any`、`@ts-ignore`、`@ts-expect-error`
+- 数据操作必须**就地修改 + REPLACE_NODE**（node 身份不变）；target 存 ID 经 `findSessionInTree` 定位
+- 持久化只写 Node 顶层记录；绝不创建独立 Session/Entry 顶层记录
+- 未经明确请求不 commit
+- 用户输入历史归档于 [agents/HISTORY.md](agents/HISTORY.md)，不追加回本文件

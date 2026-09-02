@@ -82,16 +82,19 @@ export function NodeLibrary({ nodeTitles, currentNodeTitle, onNodeClick, onNodeD
                         <Plus className="w-3 h-3 text-muted-foreground" />
                       </button>
                     )}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setRenamingNode(title);
-                        setRenameValue(title);
-                      }}
-                      className="p-0.5 rounded hover:bg-accent"
-                    >
-                      <Pencil className="w-3 h-3 text-muted-foreground" />
-                    </button>
+                    {!showGuideMap && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRenamingNode(title);
+                          setRenameValue(title);
+                        }}
+                        className="p-0.5 rounded hover:bg-accent"
+                        title="重命名"
+                      >
+                        <Pencil className="w-3 h-3 text-muted-foreground" />
+                      </button>
+                    )}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

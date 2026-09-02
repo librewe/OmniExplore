@@ -11,11 +11,31 @@ export class LLMError extends Error {
   }
 }
 
+export interface StreamChunk {
+  content?: string;
+  reasoning?: string;
+}
+
+/**
+ * 构造 thinking 触发参数（按 base_url 判断网关格式）。
+ * - DeepSeek 官方 / 智谱原生 / Kimi K2.x：`thinking: {type: "enabled"}`
+ * - 阿里百炼 / QwenCloud（dashscope/aliyuncs）：`enable_thinking: true`
+ * - 其他（默认 OpenAI 兼容）：发 `thinking.type`，不强行加避免不兼容网关报错
+ */
+function buildThinkingParam(config: LLMConfig): Record<string, unknown> | null {
+  if (config.enableThinking === false) return null;
+  const base = config.base_url.toLowerCase();
+  if (base.includes("dashscope") || base.includes("aliyuncs")) {
+    return { enable_thinking: true };
+  }
+  return { thinking: { type: "enabled" } };
+}
+
 export async function* streamLLM(
   config: LLMConfig,
   systemPrompt: string,
   userPrompt: string
-): AsyncGenerator<string> {
+): AsyncGenerator<StreamChunk> {
   return yield* streamLLMChat(config, [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
@@ -25,7 +45,7 @@ export async function* streamLLM(
 export async function* streamLLMChat(
   config: LLMConfig,
   messages: { role: string; content: string }[]
-): AsyncGenerator<string> {
+): AsyncGenerator<StreamChunk> {
   const controller = new AbortController();
   const connectTimeout = setTimeout(() => controller.abort(), STREAMING_TIMEOUT_MS);
 
@@ -40,9 +60,8 @@ export async function* streamLLMChat(
       body: JSON.stringify({
         model: config.model,
         messages,
-        max_tokens: config.max_tokens,
-        temperature: config.temperature,
         stream: true,
+        ...buildThinkingParam(config),
       }),
       signal: controller.signal,
     });
@@ -81,8 +100,10 @@ export async function* streamLLMChat(
 
         try {
           const json = JSON.parse(data);
-          const content = json.choices?.[0]?.delta?.content;
-          if (content) yield content;
+          const delta = json.choices?.[0]?.delta;
+          const content = delta?.content;
+          const reasoning = delta?.reasoning_content ?? delta?.reasoning;
+          if (content || reasoning) yield { content, reasoning };
         } catch {
           // skip malformed SSE lines
         }

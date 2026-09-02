@@ -2,8 +2,8 @@ export interface LLMConfig {
   api_key: string;
   base_url: string;
   model: string;
-  max_tokens: number;
-  temperature: number;
+  /** 是否请求模型思考过程（reasoning）。默认 true；请求体按模型格式附带 thinking 触发参数 */
+  enableThinking?: boolean;
 }
 
 /**
@@ -22,12 +22,21 @@ export interface Node {
 }
 
 export interface Entry {
-  type: "qa" | "note";
+  /**
+   * qa = 问答对；note = 用户笔记；summary = 段摘要（段闭合时生成、置于段尾，不进入上下文传递）。
+   */
+  type: "qa" | "note" | "summary";
   userInput: string;
   assistantOutput: string | null;
+  /** 模型思考过程（仅 qa 使用；DeepSeek reasoning_content / OpenAI reasoning 流式累积） */
+  reasoning?: string;
   expanded: boolean;
   status?: NodeStatus;
   errorMessage?: string;
+  /** summary 生成生命周期状态（仅 summary 使用；idle/loading/streaming/done/error） */
+  summaryStatus?: NodeStatus;
+  /** 用户手动编辑过摘要时为 true，AI 重新生成不得覆盖（仅 summary 使用） */
+  summaryEdited?: boolean;
   children: Session[];
   created_at: number;
 }
@@ -57,6 +66,8 @@ export interface GuideMapNode {
   term: string;
   children: GuideMapNode[];
   _group?: boolean;
+  /** 绑定的主题 Node ID（仅叶子节点；分组/虚拟根/导图自由节点无此字段）。用于精确查找"当前节点在导图中的位置"，消除同名 term 歧义 */
+  nodeId?: string;
 }
 
 export type NodeStatus = "idle" | "loading" | "streaming" | "done" | "error";

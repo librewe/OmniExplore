@@ -26,6 +26,11 @@ next-env.d.ts
 *.swp
 *.swo
 
+# tool config (per-machine, never commit)
+.claude/
+.agents/
+.sisyphus/
+
 # draft / legacy
 .draft/
 

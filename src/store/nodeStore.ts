@@ -13,6 +13,8 @@ export type NodeAction =
   | { type: "CLEAR_NODE" }
   | { type: "SET_ENTRY_STATUS"; entry: Entry; status: NodeStatus; errorMessage?: string }
   | { type: "SET_STREAMING_CONTENT"; entry: Entry; content: string }
+  | { type: "SET_ENTRY_SUMMARY"; entry: Entry; content: string }
+  | { type: "SET_ENTRY_SUMMARY_STATUS"; entry: Entry; status: NodeStatus; errorMessage?: string }
   | { type: "SET_SELECTED_ENTRY"; entry: Entry | null }
   | { type: "SET_SELECTED_SESSION"; session: Session | null }
   | { type: "SET_ACTIVE_TAG"; sessionId: string; title: string }
@@ -34,10 +36,19 @@ export function nodeReducer(state: NodeState, action: NodeAction): NodeState {
       if (!state.node) return state;
       action.entry.assistantOutput = action.content;
       return { ...state };
+    case "SET_ENTRY_SUMMARY":
+      if (!state.node) return state;
+      action.entry.userInput = action.content;
+      return { ...state };
+    case "SET_ENTRY_SUMMARY_STATUS":
+      if (!state.node) return state;
+      action.entry.summaryStatus = action.status;
+      if (action.errorMessage !== undefined) action.entry.errorMessage = action.errorMessage;
+      return { ...state };
     case "SET_SELECTED_ENTRY":
-      return { ...state, selectedEntry: action.entry, selectedSession: null };
+      return { ...state, selectedEntry: action.entry };
     case "SET_SELECTED_SESSION":
-      return { ...state, selectedSession: action.session, selectedEntry: null };
+      return { ...state, selectedSession: action.session };
     case "SET_ACTIVE_TAG":
       return { ...state, activeTag: { sessionId: action.sessionId, title: action.title } };
     case "RENAME_NODE":
@@ -64,6 +75,6 @@ export function createSession(title: string, groupId?: string): Session {
   return { id: crypto.randomUUID(), title, entries: [], groupId, created_at: Date.now(), updated_at: Date.now() };
 }
 
-export function createEntry(type: "qa" | "note", userInput: string): Entry {
+export function createEntry(type: "qa" | "note" | "summary", userInput: string): Entry {
   return { type, userInput, assistantOutput: null, expanded: false, children: [], created_at: Date.now() };
 }

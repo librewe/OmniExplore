@@ -1,14 +1,15 @@
 "use client";
 
-import { Search, ArrowRight } from "lucide-react";
+import { Search, ArrowRight, X } from "lucide-react";
 
 interface OnboardingProps {
   recentTerms: string[];
   onTermClick: (term: string) => void;
+  onRemoveTerm: (term: string) => void;
   onSubmit: (term: string) => void;
 }
 
-export function Onboarding({ recentTerms, onTermClick, onSubmit }: OnboardingProps) {
+export function Onboarding({ recentTerms, onTermClick, onRemoveTerm, onSubmit }: OnboardingProps) {
   return (
     <div className="flex flex-col items-center justify-center h-full px-8">
       <div className="max-w-md w-full text-center animate-fade-in">
@@ -39,14 +40,22 @@ export function Onboarding({ recentTerms, onTermClick, onSubmit }: OnboardingPro
             <p className="text-xs text-muted-foreground mb-2">最近探索</p>
             <div className="flex flex-wrap gap-1.5">
               {recentTerms.map((term) => (
-                <button
-                  key={term}
-                  onClick={() => onTermClick(term)}
-                  className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-xs text-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
-                >
-                  <Search className="w-3 h-3" />
-                  {term}
-                </button>
+                <div key={term} className="relative group">
+                  <button
+                    onClick={() => onTermClick(term)}
+                    className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-xs text-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                  >
+                    <Search className="w-3 h-3" />
+                    {term}
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onRemoveTerm(term); }}
+                    title="移除"
+                    className="absolute -top-1.5 -right-1.5 hidden group-hover:inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-background text-muted-foreground border border-border hover:text-destructive hover:border-destructive/50 transition-colors"
+                  >
+                    <X className="w-2 h-2" />
+                  </button>
+                </div>
               ))}
             </div>
           </div>

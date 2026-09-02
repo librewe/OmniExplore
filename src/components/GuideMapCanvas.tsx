@@ -44,7 +44,7 @@ function cloneTree(tree: GuideMapNode): GuideMapNode {
   return structuredClone(tree);
 }
 
-function getNodeByPath(root: GuideMapNode, path: NodePath): GuideMapNode | null {
+export function getNodeByPath(root: GuideMapNode, path: NodePath): GuideMapNode | null {
   if (!root) return null;
   if (path.length === 0) return root;
   const list = root.term === "" ? root.children : [root];
@@ -72,12 +72,37 @@ export function buildBreadcrumbItems(
   return items;
 }
 
-/** 查找术语在导图中的路径（大小写不敏感，递归整棵树）；不存在返回 null */
-export function findNodePath(root: GuideMapNode | null, term: string): NodePath | null {
+/** 查找术语在导图中的路径（大小写不敏感，递归整棵树）；不存在返回 null。isMatch 可选谓词，用于限定匹配节点（如"只匹配叶子"）以避免同名分组歧义 */
+export function findNodePath(
+  root: GuideMapNode | null,
+  term: string,
+  isMatch?: (node: GuideMapNode) => boolean
+): NodePath | null {
   if (!root || !term) return null;
   const lower = term.toLowerCase();
   const search = (node: GuideMapNode, path: NodePath): NodePath | null => {
-    if (node.term && node.term.toLowerCase() === lower) return path;
+    if (node.term && node.term.toLowerCase() === lower && (!isMatch || isMatch(node))) return path;
+    for (let i = 0; i < node.children.length; i++) {
+      const found = search(node.children[i], [...path, i]);
+      if (found) return found;
+    }
+    return null;
+  };
+  if (root.term === "") {
+    for (let i = 0; i < root.children.length; i++) {
+      const found = search(root.children[i], [i]);
+      if (found) return found;
+    }
+    return null;
+  }
+  return search(root, []);
+}
+
+/** 按 nodeId 精确查找节点在导图中的路径（可穿过分组定位绑定的叶子）；不存在返回 null */
+export function findNodeByNodeId(root: GuideMapNode | null, nodeId: string): NodePath | null {
+  if (!root || !nodeId) return null;
+  const search = (node: GuideMapNode, path: NodePath): NodePath | null => {
+    if (node.nodeId === nodeId) return path;
     for (let i = 0; i < node.children.length; i++) {
       const found = search(node.children[i], [...path, i]);
       if (found) return found;
