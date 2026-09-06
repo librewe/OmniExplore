@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useReducer, useState, useCallback, useRef, useMemo } from "react";
+import { useEffect, useReducer, useState, useCallback, useRef, useMemo, useLayoutEffect } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { NodeListContext } from "@/lib/NodeListContext";
 import { WorkGroupSwitcher } from "@/components/WorkGroupSwitcher";
@@ -19,6 +19,7 @@ import { initializeConfig, useConfigStore } from "@/store/configStore";
 import { getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG, getAllFiles, putFile, deleteFile, getAllNodes, putNode, deleteNode, migrateData } from "@/services/cache";
 import { streamLLMChat, LLMError } from "@/services/llm";
 import { buildMessages, buildForkChain, isSummaryEntry } from "@/services/contextBuilder";
+import { rememberTreeScroll, readTreeScroll } from "@/services/scrollMemory";
 import { cn } from "@/lib/utils";
 import { Layers, ChevronRight, Search, Plus, Pencil, Trash2, Copy, GitBranch, ArrowLeft, List } from "lucide-react";
 import { DEFAULT_PLUS_TEMPLATES, DEFAULT_SELECTION_TEMPLATES } from "@/lib/constants";
@@ -104,21 +105,39 @@ function GuideBreadcrumb({
   );
 }
 
+type NavEntry =
+  | { type: "tree"; term: string }
+  | { type: "guideMap"; pathStr: string; focusPath: number[] }
+  | { type: "session"; sessionId: string; title: string };
+
+// 树/目录滚动容器：scrollTop 按视图槽位瞬时记忆，容器挂载或槽位切换时恢复
+function ScrollingPane({ slot, className, children }: { slot: string; className: string; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el) el.scrollTop = readTreeScroll(slot);
+  }, [slot]);
+  return (
+    <div
+      ref={ref}
+      className={className}
+      onScroll={(e) => rememberTreeScroll(slot, e.currentTarget.scrollTop)}
+    >
+      {children}
+    </div>
+  );
+}
+
+function navEntryEq(a: NavEntry, b: NavEntry): boolean {
+  if (!a || !b) return false;
+  if (a.type !== b.type) return false;
+  if (a.type === "tree" && b.type === "tree") return a.term === b.term;
+  if (a.type === "guideMap" && b.type === "guideMap") return a.pathStr === b.pathStr;
+  if (a.type === "session" && b.type === "session") return a.sessionId === b.sessionId;
+  return false;
+}
+
 export default function Home() {
-  type NavEntry =
-    | { type: "tree"; term: string }
-    | { type: "guideMap"; pathStr: string; focusPath: number[] }
-    | { type: "session"; sessionId: string; title: string };
-
-  function navEntryEq(a: NavEntry, b: NavEntry): boolean {
-    if (!a || !b) return false;
-    if (a.type !== b.type) return false;
-    if (a.type === "tree" && b.type === "tree") return a.term === b.term;
-    if (a.type === "guideMap" && b.type === "guideMap") return a.pathStr === b.pathStr;
-    if (a.type === "session" && b.type === "session") return a.sessionId === b.sessionId;
-    return false;
-  }
-
   const isInitialized = useRef(false);
 
   const [nodeState, dispatchNode] = useReducer(nodeReducer, getInitialNodeState());
@@ -211,6 +230,8 @@ export default function Home() {
   const [showTOC, setShowTOC] = useState(false);
   const [innerSessionId, setInnerSessionId] = useState<string | null>(null);
   const [fillValue, setFillValue] = useState<string>("");
+  /** fork 后滚动定位计数：非零时滚动到新分支（fork 出的子 Session 追加在源 entry 内容之下，可能超出视口） */
+  const [forkScrollTick, setForkScrollTick] = useState(0);
   const [editingEntry, setEditingEntry] = useState<Entry | null>(null);
   const [navHistory, setNavHistory] = useState<NavEntry[]>([]);
   const [navIndex, setNavIndex] = useState(-1);
@@ -251,12 +272,16 @@ export default function Home() {
   const prevRightRef = useRef(288);
   const prevRightCollapsedRef = useRef(true);
   const hadPdfRef = useRef(false);
+  const rightWidthRef = useRef(rightWidth);
+  rightWidthRef.current = rightWidth;
+  const rightCollapsedRef = useRef(rightCollapsed);
+  rightCollapsedRef.current = rightCollapsed;
 
   useEffect(() => {
     if (activePdf) {
       if (!hadPdfRef.current) {
-        prevRightRef.current = rightWidth;
-        prevRightCollapsedRef.current = rightCollapsed;
+        prevRightRef.current = rightWidthRef.current;
+        prevRightCollapsedRef.current = rightCollapsedRef.current;
         hadPdfRef.current = true;
         setRightCollapsed(false);
         setRightWidth(Math.max(400, window.innerWidth * 0.45));
@@ -278,7 +303,7 @@ export default function Home() {
       setRightCollapsed(prevRightCollapsedRef.current);
       setPdfBoundNode(null);
     }
-  }, [activePdf, nodeList]);
+  }, [activePdf, nodeList, saveBindings]);
 
   useEffect(() => {
     if (!toast) return;
@@ -442,6 +467,8 @@ export default function Home() {
   const handleFocusNode = useCallback(async (title: string, silent = false) => {
     if (!title.trim()) return;
     const existing = nodeList.find(n => n.title.toLowerCase() === title.trim().toLowerCase());
+    // 切换目标节点才清空草稿；重聚焦当前节点保留 pending fill（如 PDF 划词待提交问题）
+    if (nodeState.node?.id !== existing?.id) setFillValue("");
     if (existing) {
       targetSessionIdRef.current = null;
       dispatchNode({ type: "SET_NODE", node: existing });
@@ -497,21 +524,20 @@ export default function Home() {
     ensureGuideMap(title.trim(), node.id);
     // Set preview content from root sessions
     setPreviewContent(buildNodePreview(node));
-  }, [nodeList, addRecentInput, navIndex, ensureGuideMap, activeGroupId, buildNodePreview]);
+  }, [nodeList, addRecentInput, navIndex, ensureGuideMap, activeGroupId, buildNodePreview, nodeState.node?.id]);
 
   const handleStreamEntry = useCallback(
     async (entry: Entry, config: import("@/types").LLMConfig, messages: { role: string; content: string }[]) => {
-      // Abort any previous stream
       streamingAbortRef.current?.abort();
       const abort = new AbortController();
       streamingAbortRef.current = abort;
       dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "loading" });
       console.log(`[OmniExplore] LLM request (${messages.length} msgs):`, JSON.stringify(messages, null, 2));
+      let accumulated = "";
+      let accumulatedReasoning = "";
       try {
-        let accumulated = "";
-        let accumulatedReasoning = "";
-        const generator = streamLLMChat(config, messages);
         dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "streaming" });
+        const generator = streamLLMChat(config, messages, abort.signal);
         for await (const chunk of generator) {
           if (abort.signal.aborted) break;
           if (chunk.content) accumulated += chunk.content;
@@ -519,18 +545,22 @@ export default function Home() {
           if (accumulatedReasoning) entry.reasoning = accumulatedReasoning;
           dispatchNode({ type: "SET_STREAMING_CONTENT", entry, content: accumulated });
         }
-        // abort（新流打断旧流）也置 done，避免旧 entry 图标永远停留"加载中"
-        dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "done" });
-        return accumulated;
       } catch (err) {
-        if (abort.signal.aborted) return null;
-        console.error("[OmniExplore] LLM stream error:", err);
-        const message = err instanceof LLMError ? err.message : "网络连接失败";
-        dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "error", errorMessage: message });
-        return null;
+        if (abort.signal.aborted) {
+          // 新流打断旧流：保留部分内容按 done 收尾，不能让旧 entry 永久停在 streaming
+          console.log("[OmniExplore] LLM stream aborted by newer request, partial kept");
+        } else {
+          console.error("[OmniExplore] LLM stream error:", err);
+          const message = err instanceof LLMError ? err.message : "网络连接失败";
+          dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "error", errorMessage: message });
+          return null;
+        }
       } finally {
         if (streamingAbortRef.current === abort) streamingAbortRef.current = null;
       }
+      // 正常结束或主动打断：均置 done（思考过程 spinner 随之消失）
+      dispatchNode({ type: "SET_ENTRY_STATUS", entry, status: "done" });
+      return accumulated;
     },
     []
   );
@@ -704,14 +734,17 @@ export default function Home() {
   }, []);
 
   const handleSelectSession = useCallback((session: Session | null) => {
+    const prev = targetSessionIdRef.current;
+    const node = nodeRef.current;
     dispatchNode({ type: "SET_SELECTED_SESSION", session });
     dispatchNode({ type: "SET_SELECTED_ENTRY", entry: null });
     if (session) {
+      if (prev !== session.id) setFillValue("");
       dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: session.id, title: session.title });
       targetSessionIdRef.current = session.id;
     } else {
       targetSessionIdRef.current = null;
-      const node = nodeRef.current;
+      if (prev !== node?.id) setFillValue("");
       if (node) dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: node.id, title: node.title });
     }
   }, []);
@@ -797,6 +830,18 @@ export default function Home() {
     return () => cancelAnimationFrame(id);
   }, [innerSessionId]);
 
+  // fork 后滚动到新分支：fork 出的子 Session 渲染在源 entry 内容之下，可能超出视口
+  useEffect(() => {
+    if (forkScrollTick === 0) return;
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = document.querySelector(".tree-node-selected");
+        el?.scrollIntoView({ block: "center", behavior: "auto" });
+      });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [forkScrollTick]);
+
   const handleCreateEmptyEntry = useCallback(async () => {
     const s = findSessionInTree(targetSessionIdRef.current ?? "") || nodeRef.current?.sessions[0];
     if (!s) return;
@@ -828,6 +873,7 @@ export default function Home() {
     dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
     await putNode(nodeRef.current!);
     handleSelectSession(child);
+    setForkScrollTick((t) => t + 1);
   }, [closeSegmentAndSummarize, handleSelectSession]);
 
   const handleSessionContextMenu = useCallback((e: React.MouseEvent, session: Session) => { e.preventDefault(); contextSessionRef.current = session; setContextTarget({ type: "session", id: session.id }); setContextPos({ x: e.clientX, y: e.clientY }); }, []);
@@ -892,7 +938,10 @@ export default function Home() {
     if (targetSessionIdRef.current === s.id) targetSessionIdRef.current = null;
     if (nodeState.activeTag.sessionId === s.id) {
       const node = nodeRef.current;
-      if (node) dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: node.id, title: node.title });
+      if (node) {
+        setFillValue("");
+        dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: node.id, title: node.title });
+      }
     }
     closeContext();
   }, [nodeState.node, nodeState.activeTag.sessionId, contextTarget, closeContext, removeFromGuideMap]);
@@ -965,7 +1014,7 @@ export default function Home() {
       }
     }
     setRenamingNodeId(null);
-  }, [nodeState.node, updateGuideMapTerm]);
+  }, [nodeState.node, updateGuideMapTerm, saveBindings]);
 
   const findSessionForEntry = useCallback((entry: Entry): Session | undefined => {
     const node = nodeRef.current;
@@ -994,6 +1043,7 @@ export default function Home() {
     if (entry) {
       const host = findSessionForEntry(entry);
       if (host) {
+        if (targetSessionIdRef.current !== host.id) setFillValue("");
         dispatchNode({ type: "SET_SELECTED_SESSION", session: host });
         dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: host.id, title: host.title });
         targetSessionIdRef.current = host.id;
@@ -1141,6 +1191,7 @@ export default function Home() {
       setActiveGroupId(groupId);
       localStorage.setItem("active_group_id", groupId);
       targetSessionIdRef.current = null;
+      setFillValue("");
       setGuideFocusPath([]);
       dispatchNode({ type: "CLEAR_NODE" });
       setShowGuideMap(false);
@@ -1165,6 +1216,7 @@ export default function Home() {
       setWorkGroups((prev) => [...prev, group]);
       localStorage.setItem("active_group_id", group.id);
       targetSessionIdRef.current = null;
+      setFillValue("");
       setGuideFocusPath([]);
       dispatchNode({ type: "CLEAR_NODE" });
       setShowGuideMap(false);
@@ -1198,6 +1250,7 @@ export default function Home() {
         const remaining = workGroups.filter((g) => g.id !== id);
         localStorage.removeItem("active_group_id");
         targetSessionIdRef.current = null;
+        setFillValue("");
         setGuideFocusPath([]);
         dispatchNode({ type: "CLEAR_NODE" });
         setInnerSessionId(null);
@@ -1386,6 +1439,7 @@ export default function Home() {
           setShowTOC(true);
           setInnerSessionId(null);
           targetSessionIdRef.current = null;
+          setFillValue("");
           const node = nodeRef.current;
           if (node) dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: node.id, title: node.title });
           return;
@@ -1399,6 +1453,7 @@ export default function Home() {
               return next;
             });
             setNavIndex((prev) => navPushedRef.current ? prev + 1 : prev);
+          setFillValue("");
           ensureGuideMap(undefined, nodeState.node.id);
           setShowGuideMap(true);
         }
@@ -1456,9 +1511,18 @@ export default function Home() {
 
   const hoverNode = hoverTermPreview ? nodeList.find((n) => n.title === hoverTermPreview) : null;
   const hoverPreviewLine = hoverNode?.sessions?.[0]?.entries?.[0]?.userInput?.split("\n")[0].slice(0, 30) ?? null;
+  const innerRootTitle = innerSessionId ? findSessionInTree(innerSessionId)?.title ?? "" : "";
+
+  // 输入框草稿与追加目标绑定：目标（节点/会话/导图层级）变化时 remount 清空本地草稿，防跨目标残留
+  const inputKey = showGuideMap
+    ? `map:${guideFocusPath.join("/")}`
+    : showTOC
+      ? `node:${nodeState.node?.id ?? "none"}`
+      : `tree:${nodeState.activeTag.sessionId || nodeState.node?.id || "none"}`;
 
   const inputBar = (
     <InputBar
+      key={inputKey}
       tagLabel={showGuideMap ? "在当前层级新增节点" : showTOC ? "" : nodeState.activeTag.title}
       tagPrefix={showGuideMap ? "" : undefined}
       placeholder={showTOC ? `在「${nodeState.node?.title ?? ""}」下开始对话` : undefined}
@@ -1771,12 +1835,12 @@ export default function Home() {
                         <span>目录</span>
                       </button>
                       <span className="w-px h-4 bg-border mx-2 shrink-0" />
-                      <span className="text-base font-semibold truncate">{nodeState.node?.title ?? ""}</span>
+                      <span className="text-base font-semibold truncate">{innerRootTitle || nodeState.node?.title || ""}</span>
                     </>
                   ) : (
                     <>
                       <button
-                        onClick={() => { ensureGuideMap(); setShowGuideMap(true); }}
+                        onClick={() => { setFillValue(""); ensureGuideMap(); setShowGuideMap(true); }}
                         className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors shrink-0"
                         title="进入组合视图"
                       >
@@ -1864,7 +1928,7 @@ export default function Home() {
               />
               </div>
             ) : showTOC && nodeState.node ? (
-              <div className="flex-1 overflow-auto [scrollbar-gutter:stable]">
+              <ScrollingPane slot={`toc:${nodeState.node.id}`} className="flex-1 overflow-auto [scrollbar-gutter:stable]">
                 <div className="flex flex-col min-h-full">
                   <div className="flex-1">
                     <div className="max-w-3.5xl mx-auto pt-4 pr-4 pb-24">
@@ -1878,13 +1942,10 @@ export default function Home() {
                       />
                     </div>
                   </div>
-                  <div className="sticky bottom-0 z-50 shrink-0">
-                    {inputBar}
-                  </div>
                 </div>
-              </div>
+              </ScrollingPane>
             ) : nodeState.node ? (
-              <div className="flex-1 overflow-auto [scrollbar-gutter:stable]">
+              <ScrollingPane slot={innerSessionId ? `inner:${nodeState.node.id}:${innerSessionId}` : `tree:${nodeState.node.id}`} className="flex-1 overflow-auto [scrollbar-gutter:stable]">
                 <div className="flex flex-col min-h-full">
                   <div className="flex-1">
                     {/* 内层（无 Node 顶行，sticky 首行 top=0 贴顶）去掉 pt-4，避免展开/收起时顶部空隙跳变 */}
@@ -1902,6 +1963,7 @@ export default function Home() {
                         onPlusSelect={handlePlusSelect} onCreateEmptyEntry={handleCreateEmptyEntry}
                         onCreateRootSession={handleCreateRootSession}
                         onNodeFocus={(session, title) => {
+                          setFillValue("");
                           dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: session.id, title });
                           targetSessionIdRef.current = session.id;
                         }}
@@ -1913,11 +1975,8 @@ export default function Home() {
                       />
                     </div>
                   </div>
-                  <div className="sticky bottom-0 z-50 shrink-0" onClick={(e) => e.stopPropagation()}>
-                    {inputBar}
-                  </div>
                 </div>
-              </div>
+              </ScrollingPane>
             ) : (
               <Onboarding
                 recentTerms={recentInputs}
@@ -1927,7 +1986,7 @@ export default function Home() {
               />
             )}
 
-            {showGuideMap || !nodeState.node ? inputBar : null}
+            {showGuideMap || nodeState.node ? inputBar : null}
           </div>
         </main>
 

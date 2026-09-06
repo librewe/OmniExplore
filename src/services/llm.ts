@@ -42,12 +42,47 @@ export async function* streamLLM(
   ]);
 }
 
+/**
+ * 流式调用 chat/completions。
+ * @param signal 外部中止信号（新流打断旧流用）：中止会真正取消底层 fetch 并静默结束生成器，
+ *   让调用方把旧 entry 置 done 保留部分内容，而不是永久停在 streaming。
+ * 超时语义：
+ * - 连接超时 STREAMING_TIMEOUT_MS 只覆盖建连阶段，收到响应头即清除（流式过程无总体超时，防长回复被腰斩）。
+ * - 空闲看门狗：建连后每收到一帧数据重置；网关静默挂起（无数据）超过阈值时中止并抛"请求超时"，
+ *   避免 entry 永久停在 streaming（思考过程无限转圈）。
+ */
 export async function* streamLLMChat(
   config: LLMConfig,
-  messages: { role: string; content: string }[]
+  messages: { role: string; content: string }[],
+  signal?: AbortSignal
 ): AsyncGenerator<StreamChunk> {
   const controller = new AbortController();
-  const connectTimeout = setTimeout(() => controller.abort(), STREAMING_TIMEOUT_MS);
+  let abortedByExternal = false;
+  const onExternalAbort = () => {
+    abortedByExternal = true;
+    controller.abort();
+  };
+  if (signal) {
+    if (signal.aborted) {
+      abortedByExternal = true;
+      controller.abort();
+    } else {
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+  }
+
+  const connectTimer = setTimeout(() => controller.abort(), STREAMING_TIMEOUT_MS);
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const armIdleWatchdog = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => controller.abort(), STREAMING_TIMEOUT_MS);
+  };
+  const clearIdleWatchdog = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
 
   try {
     const baseUrl = config.base_url.replace(/\/+$/, "");
@@ -77,15 +112,19 @@ export async function* streamLLMChat(
       throw new LLMError(text || `请求失败 (${response.status})`, "unknown");
     }
 
+    clearTimeout(connectTimer);
+
     const reader = response.body?.getReader();
     if (!reader) throw new LLMError("无法读取响应流", "network");
 
     const decoder = new TextDecoder();
     let buffer = "";
+    armIdleWatchdog();
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      armIdleWatchdog();
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
@@ -112,11 +151,14 @@ export async function* streamLLMChat(
   } catch (err) {
     if (err instanceof LLMError) throw err;
     if ((err as Error).name === "AbortError") {
+      if (abortedByExternal) return;
       throw new LLMError("请求超时", "timeout");
     }
     throw new LLMError("网络连接失败", "network");
   } finally {
-    clearTimeout(connectTimeout);
+    clearTimeout(connectTimer);
+    clearIdleWatchdog();
+    if (signal) signal.removeEventListener("abort", onExternalAbort);
   }
 }
 

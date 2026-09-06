@@ -4,6 +4,9 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { Send, CornerDownLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+/** 多行输入最大高度（px），超过后内部滚动 */
+const MAX_INPUT_HEIGHT = 180;
+
 interface InputBarProps {
   tagLabel: string;
   fillValue?: string;
@@ -29,33 +32,42 @@ export function InputBar({
   disabled,
 }: InputBarProps) {
   const [value, setValue] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  const autoResize = useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = `${Math.min(el.scrollHeight, MAX_INPUT_HEIGHT)}px`;
+  }, []);
+
+  // 程序化填充（划词追问/加号预设等）才回填并聚焦；目标切换清空草稿由父层 key remount 承担
   useEffect(() => {
-    if (fillValue !== undefined && fillValue !== null) {
+    if (fillValue) {
       setValue(fillValue);
       inputRef.current?.focus();
     }
   }, [fillValue]);
 
+  useEffect(() => {
+    autoResize();
+  }, [value, autoResize]);
+
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key !== "Enter") return;
+      if (e.nativeEvent.isComposing) return;
+      // Shift+Enter：插入换行（保留默认行为）
+      if (e.shiftKey) return;
+      e.preventDefault();
       const trimmed = value.trim();
       if (!trimmed || disabled) return;
-
-      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
+      if (e.ctrlKey || e.metaKey || tagLabel || forceCreate) {
         onCreateChild?.(trimmed);
-        setValue("");
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        if (tagLabel || forceCreate) {
-          onCreateChild?.(trimmed);
-        } else {
-          onFocus?.(trimmed);
-        }
-        setValue("");
+      } else {
+        onFocus?.(trimmed);
       }
+      setValue("");
     },
     [value, disabled, tagLabel, forceCreate, onFocus, onCreateChild]
   );
@@ -80,26 +92,29 @@ export function InputBar({
             <span>{tagPrefix !== undefined ? tagPrefix : "追加到"} {tagLabel}</span>
           </div>
         )}
-        <div className="flex items-center gap-2 rounded-xl border border-input bg-card/90 shadow-lg backdrop-blur-sm pl-4 pr-1.5 py-1 transition-colors focus-within:ring-1 focus-within:ring-ring">
-          <input
+        <div className="rounded-[20px] border border-input bg-card/90 shadow-lg backdrop-blur-sm transition-colors focus-within:ring-1 focus-within:ring-ring">
+          <textarea
             ref={inputRef}
-            type="text"
+            rows={1}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={disabled}
             placeholder={placeholder ?? (tagLabel
-              ? "输入内容，Ctrl+回车发送…"
+              ? "输入内容，Shift+Enter 换行…"
               : "输入概念，按回车探索…")}
-            className="omni-input-bar flex-1 h-9 bg-transparent text-sm placeholder:text-muted-foreground focus-visible:outline-none disabled:opacity-50"
+            className="omni-input-bar block w-full resize-none overflow-y-auto bg-transparent px-4 pt-3 pb-1 text-base leading-snug placeholder:text-muted-foreground focus-visible:outline-none disabled:opacity-50"
           />
-          <button
-            onClick={handleSend}
-            disabled={disabled || !value.trim()}
-            className="shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
-          >
-            <Send className="w-4 h-4" />
-          </button>
+          <div className="flex items-center justify-between px-3 pb-2">
+            <span className="text-xs text-muted-foreground select-none">Placeholder · Press</span>
+            <button
+              onClick={handleSend}
+              disabled={disabled || !value.trim()}
+              className="shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+            >
+              <Send className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </div>
     </div>

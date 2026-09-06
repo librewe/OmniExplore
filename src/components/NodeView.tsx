@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { ChevronRight, Loader2, AlertCircle, GitBranch, Plus, Pencil, RefreshCw, Copy, Undo2 } from "lucide-react";
 import type { Node, Session, Entry, NodeStatus, PlusMenuItem } from "@/types";
 import { TermText } from "./TermText";
 import { PlusMenu } from "./PlusMenu";
 import { cn } from "@/lib/utils";
+import { rememberEntryScroll, readEntryScroll } from "@/services/scrollMemory";
 
 /** 层级粘滞滚动：行秩连续计数（Node=0 → 根 Session=1 → 其 entry=2 → 子 Session=3 …），sticky top = 行秩 × ROW_H。ROW_H 与实测行高一致（约 30px），粘滞时行间紧贴、互不遮挡、无缝隙透出 */
 const ROW_H = 30;
@@ -73,6 +74,27 @@ function EntryRow({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [editingSummary, setEditingSummary] = useState(false);
   const [showReasoning, setShowReasoning] = useState(false);
+  // 长内容滚动盒：done 才限高；由流式转完成时锚到顶部，其余挂载恢复该 entry 的记忆 scrollTop
+  const scrollBoxRef = useRef<HTMLDivElement>(null);
+  const prevStreamingRef = useRef(isStreaming);
+  const scrollCapped =
+    isExpanded && !isSummary && !isEditing && !isStreaming && (entry.type === "note" || !!entry.assistantOutput);
+
+  useLayoutEffect(() => {
+    const el = scrollBoxRef.current;
+    if (!el) return;
+    if (!scrollCapped) {
+      prevStreamingRef.current = isStreaming;
+      return;
+    }
+    if (prevStreamingRef.current && !isStreaming) {
+      el.scrollTop = 0;
+      rememberEntryScroll(entry, el.scrollTop);
+    } else {
+      el.scrollTop = readEntryScroll(entry);
+    }
+    prevStreamingRef.current = isStreaming;
+  }, [scrollCapped, isStreaming, entry, isExpanded]);
 
   // 进入编辑态时把编辑框滚入视野（如新增上下文自动编辑）
   useEffect(() => {
@@ -82,6 +104,15 @@ function EntryRow({
   }, [isEditing]);
 
   const rowRank = depth * 2 - (stickyRankOffset ?? 0);
+  // 段摘要属于 fork entry 的内容附属行：不参与粘滞，避免与所属 entry 同 rank 同 top 吸顶时盖在 entry 粘滞行之上
+  const rowStyle: React.CSSProperties = isSummary
+    ? { backgroundColor: isSelected ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : undefined) }
+    : {
+        position: "sticky",
+        top: rowRank * ROW_H,
+        zIndex: Math.max(10, 40 - rowRank),
+        backgroundColor: isSelected ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : STICKY_BG),
+      };
 
   const firstLine = entry.userInput.split("\n")[0];
   const truncatedTitle = isSummary
@@ -98,12 +129,7 @@ function EntryRow({
         style={{ zIndex: 1, backgroundColor: "hsl(var(--border))" }}
       />
       <div className={cn("tree-node-row group flex items-start gap-1 py-0.5 rounded-md transition-colors cursor-default", isSelected && "tree-node-selected")}
-        style={{
-          position: "sticky",
-          top: rowRank * ROW_H,
-          zIndex: Math.max(10, 40 - rowRank),
-          backgroundColor: isSelected ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : STICKY_BG),
-        }}
+        style={rowStyle}
         onClick={(e) => { e.stopPropagation(); onSelect(entry); }}
         onDoubleClick={() => {
           if (!entry.expanded) onToggleExpand(session, entry);
@@ -143,7 +169,10 @@ function EntryRow({
       </div>
 
       {isExpanded && (entry.assistantOutput || entry.type === "note" || isSummary || isStreaming) && (
-        <div className="ml-0 py-1 select-text" style={{ paddingLeft: 20, paddingRight: 20 }}
+        <div ref={scrollBoxRef}
+          className={cn("ml-0 py-1 select-text", scrollCapped && "overflow-y-auto max-h-[60vh]")}
+          style={{ paddingLeft: 20, paddingRight: 20 }}
+          onScroll={scrollCapped ? (e) => rememberEntryScroll(entry, e.currentTarget.scrollTop) : undefined}
           onMouseUp={() => {
             const sel = window.getSelection()?.toString().trim();
             if (sel) {
@@ -286,17 +315,23 @@ function SessionView({ session, depth, nodeTitle, ...rest }: SessionViewProps) {
   const isRootSession = depth === 1;
   const isRenaming = rest.renamingNodeId === session.id;
   const isAncestor = subtreeContains(session, rest.selectedSession, rest.selectedEntry);
+  // 内层模式（stickyRankOffset>0）：根 Session 行改为普通流（其标题常驻顶栏），不再参与粘滞楼梯，
+  // 故后代行秩由 NodeView 传 offset=2 重新从 0 起算
+  const isInnerRoot = (rest.stickyRankOffset ?? 0) > 0 && depth === 1;
   const stickyRank = depth * 2 - 1 - (rest.stickyRankOffset ?? 0);
+  const rowStyle: React.CSSProperties = isInnerRoot
+    ? { backgroundColor: rest.selectedSession === session && !rest.selectedEntry ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : undefined) }
+    : {
+        position: "sticky",
+        top: stickyRank * ROW_H,
+        zIndex: Math.max(10, 40 - stickyRank),
+        backgroundColor: rest.selectedSession === session && !rest.selectedEntry ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : STICKY_BG),
+      };
 
   return (
     <div className="select-none" style={{ paddingLeft: depth > 0 ? 20 : 0 }}>
       <div className={cn("tree-node-row group flex items-start gap-1 py-0.5 rounded-md transition-colors cursor-default", rest.selectedSession === session && !rest.selectedEntry && "tree-node-selected")}
-        style={{
-          position: "sticky",
-          top: stickyRank * ROW_H,
-          zIndex: Math.max(10, 40 - stickyRank),
-          backgroundColor: rest.selectedSession === session && !rest.selectedEntry ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : STICKY_BG),
-        }}
+        style={rowStyle}
         onClick={(e) => { e.stopPropagation(); rest.onSelectSession(session); }}
         onContextMenu={(e) => { e.preventDefault(); rest.onSelectSession(session); rest.onSessionContextMenu(e, session); }}
       >
@@ -397,7 +432,7 @@ export function NodeView({ node, onSelectNode, onNodeContextMenu, onCreateRootSe
     if (!focusedSession) return <div className="select-none" />;
     return (
       <div className="select-none">
-        <SessionView key={focusedSession.id} session={focusedSession} depth={1} nodeTitle={node.title} stickyRankOffset={1} {...rest} />
+        <SessionView key={focusedSession.id} session={focusedSession} depth={1} nodeTitle={node.title} stickyRankOffset={2} {...rest} />
       </div>
     );
   }
