@@ -165,7 +165,7 @@ export function SettingsPanel({
                   <Input
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
-                    placeholder="https://api.openai.com"
+                    placeholder="https://api.deepseek.com"
                     className="mt-1"
                   />
                 </div>
@@ -174,7 +174,7 @@ export function SettingsPanel({
                   <Input
                     value={model}
                     onChange={(e) => setModel(e.target.value)}
-                    placeholder="gpt-4o"
+                    placeholder="deepseek-v4-flash"
                     className="mt-1"
                   />
                 </div>

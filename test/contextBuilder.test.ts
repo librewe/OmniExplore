@@ -56,11 +56,11 @@ describe("buildMessages", () => {
     ]);
   });
 
-  it("note entry -> [笔记] user message", () => {
+  it("note entry -> prefixed user message", () => {
     const session = sessionWithInput([noteEntry("my note")], "hello");
     expect(buildMessages(session, "SYS", "hello", noopResolve)).toEqual([
       { role: "system", content: "SYS" },
-      { role: "user", content: "[笔记] my note" },
+      { role: "user", content: "[The user puts a note here] my note" },
       { role: "user", content: "hello" },
     ]);
   });
@@ -138,12 +138,12 @@ describe("buildMessages", () => {
       { role: "system", content: "SYS" },
       { role: "user", content: "Q1" },
       { role: "assistant", content: "A1" },
-      { role: "user", content: "[笔记] my note" },
+      { role: "user", content: "[The user puts a note here] my note" },
       { role: "user", content: "hello" },
     ]);
   });
 
-  it("fork source is a note -> full inheritance including [笔记]", () => {
+  it("fork source is a note -> full inheritance including note prefix", () => {
     const child = sessionWithInput([qaEntry("child prior Q", "child prior A")], "final Q", {
       id: "child",
       parentSessionId: "parent",
@@ -157,7 +157,7 @@ describe("buildMessages", () => {
     expect(buildMessages(child, "SYS", "final Q", resolve)).toEqual([
       { role: "system", content: "SYS" },
       { role: "system", content: "--- ancestor boundary ---" },
-      { role: "user", content: "[笔记] ancestor note" },
+      { role: "user", content: "[The user puts a note here] ancestor note" },
       { role: "system", content: "--- fork boundary ---" },
       { role: "user", content: "child prior Q" },
       { role: "assistant", content: "child prior A" },

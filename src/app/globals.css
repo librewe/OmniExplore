@@ -78,8 +78,9 @@
 
 @layer components {
   .term-underline {
-    text-decoration: underline;
-    text-decoration-style: dotted;
+    /* text-decoration: underline;
+    text-decoration-style: dotted; */
+    /* 我觉得下划线不太好看于是删了 */
     text-underline-offset: 4px;
     cursor: pointer;
     color: hsl(var(--primary));
@@ -103,11 +104,24 @@
     box-shadow: inset 2px 0 0 0 hsl(var(--primary));
   }
 
+  /* 粘滞 entry 行：默认背景走 class 以便 hover 覆盖；hover 用不透明混色，吸顶时仍遮底不透出下层内容 */
+  .tree-row-sticky-surface {
+    background-color: hsl(var(--background));
+  }
+  .tree-row-sticky-surface:hover {
+    background-color: color-mix(in srgb, hsl(var(--background)) 50%, hsl(var(--muted)) 50%);
+  }
+
   .drag-handle {
     opacity: 0;
     transition: opacity 0.15s;
   }
   .tree-node-row:hover .drag-handle {
     opacity: 1;
+  }
+
+  .entry-fade-mask {
+    -webkit-mask-image: linear-gradient(to top, transparent 0, black 32px);
+    mask-image: linear-gradient(to top, transparent 0, black 32px);
   }
 }

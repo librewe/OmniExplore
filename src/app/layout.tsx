@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "OmniExplore - 认知考古学工具",
+  title: "OmniExplore - 更好用的模型对话交互",
   description: "沿概念根系递归追问，Learn from scratch.",
 };
 

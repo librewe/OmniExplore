@@ -3,9 +3,10 @@
 import { X, Pencil, Plus } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
+import type { Node, Session } from "@/types";
 
 interface NodeLibraryProps {
-  nodeTitles: string[];
+  nodes: Node[];
   currentNodeTitle: string;
   onNodeClick: (title: string) => void;
   onNodeDelete: (title: string) => void;
@@ -15,23 +16,40 @@ interface NodeLibraryProps {
   search?: string;
 }
 
-export function NodeLibrary({ nodeTitles, currentNodeTitle, onNodeClick, onNodeDelete, onNodeRename, showGuideMap, onAddToGuideMap, search }: NodeLibraryProps) {
+function latestSessionUpdateAt(node: Node): number {
+  let latest = node.created_at;
+  const visit = (session: Session) => {
+    if (session.updated_at > latest) latest = session.updated_at;
+    for (const entry of session.entries) {
+      for (const child of entry.children) visit(child);
+    }
+  };
+  for (const session of node.sessions) visit(session);
+  return latest;
+}
+
+export function NodeLibrary({ nodes, currentNodeTitle, onNodeClick, onNodeDelete, onNodeRename, showGuideMap, onAddToGuideMap, search }: NodeLibraryProps) {
   const [renamingNode, setRenamingNode] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
-  const filtered = search
-    ? nodeTitles.filter((t) => t.toLowerCase().includes(search.toLowerCase()))
-    : nodeTitles;
+  const visibleNodes = (search
+    ? nodes.filter((n) => n.title.toLowerCase().includes(search.toLowerCase()))
+    : nodes
+  )
+    .map((node) => ({ node, time: latestSessionUpdateAt(node) }))
+    .sort((a, b) => b.time - a.time)
+    .map((x) => x.node);
 
   return (
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-auto py-1">
-        {filtered.length === 0 ? (
+        {visibleNodes.length === 0 ? (
           <p className="text-xs text-muted-foreground text-center py-6">
             {search ? "未找到" : "暂无节点"}
           </p>
         ) : (
-          filtered.map((title) => {
+          visibleNodes.map((node) => {
+            const title = node.title;
             const isActive = title.toLowerCase() === currentNodeTitle.toLowerCase();
             const isRenaming = renamingNode === title;
             return (
@@ -41,8 +59,8 @@ export function NodeLibrary({ nodeTitles, currentNodeTitle, onNodeClick, onNodeD
                 className={cn(
                   "flex items-center w-full px-3 py-1.5 text-sm transition-colors group cursor-pointer",
                   isActive
-                    ? "bg-primary/10 text-primary font-medium"
-                    : "hover:bg-accent"
+                    ? "bg-accent text-accent-foreground font-medium"
+                    : "hover:bg-accent/60"
                 )}
               >
                 {isRenaming ? (

@@ -308,7 +308,7 @@ export function SessionTOC({ node, onSelectSession, onEnterSummary, onEditSummar
     <div className="select-none">
       {node.sessions.length === 0 ? (
         <p className="px-2 py-6 text-center text-sm text-muted-foreground">
-          暂无会话，输入以创建第一个分支。
+          当前节点暂无会话，新会话可以在这里概览管理。
         </p>
       ) : (
         node.sessions.map((session) => (

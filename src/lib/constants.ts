@@ -7,8 +7,7 @@ export const DEFAULT_INQUIRY_SYSTEM_PROMPT = `你是认知解释专家。用户�
 请用通俗易懂的语言解释，注意在父概念语境下。
 遵循以下规则：
 1. 结合父概念"\${parentTerm}"的语境，解释"\${childTerm}"在这个上下文中的含义
-2. 用日常类比，让外行也能理解
-3. 回答控制在 150 字以内`;
+2. 回答控制在 150 字以内`;
 
 export const DEFAULT_SELECTION_TEMPLATES = [
   { id: "sel_default_intro", label: "简单介绍", prompt: "简单介绍${selected}" },
@@ -17,8 +16,8 @@ export const DEFAULT_SELECTION_TEMPLATES = [
 ];
 
 export const DEFAULT_LLM_CONFIG = {
-  base_url: "https://api.openai.com/v1",
-  model: "gpt-4o",
+  base_url: "https://api.deepseek.com",
+  model: "deepseek-v4-flash",
 };
 
 export const STREAMING_TIMEOUT_MS = 30_000;

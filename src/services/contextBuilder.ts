@@ -11,6 +11,31 @@ export function isSummaryEntry(e: Entry): boolean {
   return e.type === "summary";
 }
 
+export function appendEntryMessages(
+  messages: { role: string; content: string }[],
+  e: Entry
+): void {
+  if (!e.userInput) return;
+  if (e.type === "note") {
+    messages.push({ role: "user", content: `[The user puts a note here] ${e.userInput}` });
+  } else if (e.type === "qa") {
+    messages.push({ role: "user", content: e.userInput });
+    if (e.assistantOutput) messages.push({ role: "assistant", content: e.assistantOutput });
+  }
+}
+
+export function appendSessionMessages(
+  messages: { role: string; content: string }[],
+  session: Session,
+  upToIndex: number
+): void {
+  for (let i = 0; i <= upToIndex; i++) {
+    const e = session.entries[i];
+    if (!e || isSummaryEntry(e)) continue;
+    appendEntryMessages(messages, e);
+  }
+}
+
 /**
  * 组装 fork 祖先链上下文（沿 parentSessionId 上溯到根/摘要种子）。
  * 供 buildMessages 与 summary 生成共用——summary 也必须"到根"，否则总结缺失上下文。
@@ -47,16 +72,7 @@ export function buildForkChain(
       if (ancestor.forkBoundary) {
         messages.push({ role: "system", content: ancestor.forkBoundary });
       }
-      for (let i = 0; i <= upToIndex; i++) {
-        const pe = ancestor.entries[i];
-        if (isSummaryEntry(pe)) continue;
-        if (pe.type === "qa" && pe.userInput) {
-          messages.push({ role: "user", content: pe.userInput });
-          if (pe.assistantOutput) messages.push({ role: "assistant", content: pe.assistantOutput });
-        } else if (pe.type === "note" && pe.userInput) {
-          messages.push({ role: "user", content: `[笔记] ${pe.userInput}` });
-        }
-      }
+      appendSessionMessages(messages, ancestor, upToIndex);
     }
   };
   if (seedText !== null) {
@@ -83,15 +99,7 @@ export function buildMessages(
     { role: "system", content: systemPrompt },
   ];
   buildForkChain(session, resolveSession, messages);
-  for (const pe of session.entries.slice(0, -1)) {
-    if (isSummaryEntry(pe)) continue;
-    if (pe.type === "qa" && pe.userInput) {
-      messages.push({ role: "user", content: pe.userInput });
-      if (pe.assistantOutput) messages.push({ role: "assistant", content: pe.assistantOutput });
-    } else if (pe.type === "note" && pe.userInput) {
-      messages.push({ role: "user", content: `[笔记] ${pe.userInput}` });
-    }
-  }
+  appendSessionMessages(messages, session, session.entries.length - 2);
   messages.push({ role: "user", content: userInput });
   return messages;
 }

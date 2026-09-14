@@ -1,11 +1,14 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Send, CornerDownLeft } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Send, CornerDownLeft, ChevronDown, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /** 多行输入最大高度（px），超过后内部滚动 */
 const MAX_INPUT_HEIGHT = 180;
+
+export type InputStartMode = "ask" | "scratch";
 
 interface InputBarProps {
   tagLabel: string;
@@ -18,6 +21,10 @@ interface InputBarProps {
   onFocus?: (text: string) => void;
   onCreateChild?: (text: string) => void;
   disabled?: boolean;
+  showModeSwitch?: boolean;
+  modelLabel?: string;
+  notePlaceholder?: string;
+  onCreateNote?: (text: string) => void;
 }
 
 export function InputBar({
@@ -30,9 +37,20 @@ export function InputBar({
   onFocus,
   onCreateChild,
   disabled,
+  showModeSwitch,
+  modelLabel,
+  notePlaceholder,
+  onCreateNote,
 }: InputBarProps) {
   const [value, setValue] = useState("");
+  const [startMode, setStartMode] = useState<InputStartMode>("ask");
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const [modeAnchor, setModeAnchor] = useState<{ left: number; bottom: number } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const modeBtnRef = useRef<HTMLButtonElement>(null);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
+
+  const isScratch = !!showModeSwitch && startMode === "scratch";
 
   const autoResize = useCallback(() => {
     const el = inputRef.current;
@@ -53,6 +71,49 @@ export function InputBar({
     autoResize();
   }, [value, autoResize]);
 
+  useEffect(() => {
+    if (!modeMenuOpen) return;
+    function handleClick(e: MouseEvent) {
+      const target = e.target as Node;
+      if (modeBtnRef.current?.contains(target)) return;
+      if (modeMenuRef.current?.contains(target)) return;
+      setModeMenuOpen(false);
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setModeMenuOpen(false);
+    }
+    function handleScroll() {
+      setModeMenuOpen(false);
+    }
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [modeMenuOpen]);
+
+  const toggleModeMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (modeMenuOpen) {
+        setModeMenuOpen(false);
+        return;
+      }
+      const rect = modeBtnRef.current?.getBoundingClientRect();
+      if (rect) setModeAnchor({ left: rect.left, bottom: window.innerHeight - rect.top });
+      setModeMenuOpen(true);
+    },
+    [modeMenuOpen]
+  );
+
+  const selectMode = useCallback((mode: InputStartMode) => {
+    setStartMode(mode);
+    setModeMenuOpen(false);
+  }, []);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key !== "Enter") return;
@@ -62,29 +123,37 @@ export function InputBar({
       e.preventDefault();
       const trimmed = value.trim();
       if (!trimmed || disabled) return;
-      if (e.ctrlKey || e.metaKey || tagLabel || forceCreate) {
+      if (isScratch) {
+        onCreateNote?.(trimmed);
+      } else if (e.ctrlKey || e.metaKey || tagLabel || forceCreate) {
         onCreateChild?.(trimmed);
       } else {
         onFocus?.(trimmed);
       }
       setValue("");
     },
-    [value, disabled, tagLabel, forceCreate, onFocus, onCreateChild]
+    [value, disabled, isScratch, onCreateNote, tagLabel, forceCreate, onFocus, onCreateChild]
   );
 
   const handleSend = useCallback(() => {
     const trimmed = value.trim();
     if (!trimmed || disabled) return;
-    if (tagLabel || forceCreate) {
+    if (isScratch) {
+      onCreateNote?.(trimmed);
+    } else if (tagLabel || forceCreate) {
       onCreateChild?.(trimmed);
     } else {
       onFocus?.(trimmed);
     }
     setValue("");
-  }, [value, disabled, tagLabel, forceCreate, onFocus, onCreateChild]);
+  }, [value, disabled, isScratch, onCreateNote, tagLabel, forceCreate, onFocus, onCreateChild]);
+
+  const resolvedPlaceholder = isScratch
+    ? notePlaceholder ?? "写下一条笔记…"
+    : placeholder ?? (tagLabel ? "输入内容，Shift+Enter 换行…" : "输入概念，按回车探索…");
 
   return (
-    <div className="bg-gradient-to-t from-background via-background/95 to-transparent px-4 pt-2 pb-6">
+    <div className="bg-gradient-to-t from-background via-background/75 to-transparent px-4 pt-2 pb-6">
       <div className={cn("relative mx-auto transition-[max-width] duration-300 ease-in-out", wide ? "max-w-3xl" : "max-w-2xl")}>
         {tagLabel && (
           <div className="inline-flex items-center gap-1 rounded-md bg-accent px-2 py-0.5 text-xs font-medium text-accent-foreground mb-1.5">
@@ -100,13 +169,22 @@ export function InputBar({
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={disabled}
-            placeholder={placeholder ?? (tagLabel
-              ? "输入内容，Shift+Enter 换行…"
-              : "输入概念，按回车探索…")}
+            placeholder={resolvedPlaceholder}
             className="omni-input-bar block w-full resize-none overflow-y-auto bg-transparent px-4 pt-3 pb-1 text-base leading-snug placeholder:text-muted-foreground focus-visible:outline-none disabled:opacity-50"
           />
           <div className="flex items-center justify-between px-3 pb-2">
-            <span className="text-xs text-muted-foreground select-none">Placeholder · Press</span>
+            {showModeSwitch ? (
+              <button
+                ref={modeBtnRef}
+                onClick={toggleModeMenu}
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <span className="max-w-[180px] truncate">{isScratch ? "From scratch" : modelLabel || "Ask"}</span>
+                <ChevronDown className="w-3 h-3 shrink-0" />
+              </button>
+            ) : (
+              <span className="text-sm text-muted-foreground select-none">Placeholder · Press</span>
+            )}
             <button
               onClick={handleSend}
               disabled={disabled || !value.trim()}
@@ -117,6 +195,35 @@ export function InputBar({
           </div>
         </div>
       </div>
+      {showModeSwitch && modeMenuOpen && modeAnchor && createPortal(
+        <div
+          ref={modeMenuRef}
+          className="fixed z-[100] mb-1 min-w-[180px] rounded-md border bg-popover p-1 text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95 origin-bottom-left"
+          style={{ left: modeAnchor.left, bottom: modeAnchor.bottom }}
+        >
+          <button
+            onClick={() => selectMode("ask")}
+            className={cn(
+              "flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent",
+              !isScratch && "bg-accent/60"
+            )}
+          >
+            <span className="truncate">{modelLabel || "Ask"}</span>
+            {!isScratch && <Check className="w-3.5 h-3.5 shrink-0" />}
+          </button>
+          <button
+            onClick={() => selectMode("scratch")}
+            className={cn(
+              "flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent",
+              isScratch && "bg-accent/60"
+            )}
+          >
+            <span>new session from scratch</span>
+            {isScratch && <Check className="w-3.5 h-3.5 shrink-0" />}
+          </button>
+        </div>,
+        document.body
+      )}
     </div>
   );
 }

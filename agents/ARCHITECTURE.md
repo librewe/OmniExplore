@@ -1,6 +1,6 @@
 # OmniExplore 架构文档
 
-> 当前结构的描述：数据模型、状态管理、数据操作、导航视图、消息上下文、段摘要、组件树与持久化。改动数据/结构/状态前必读。若发现与 src/ 不符，以代码为准并回写本文件。
+> 当前结构的描述：数据模型、状态管理、数据操作、导航视图、消息上下文、段摘要、文件职责、组件树与持久化。改数据/结构/状态时按涉及范围读相关小节；与 src/ 不符以代码为准并回写。
 
 ## 数据模型
 
@@ -59,7 +59,7 @@ nodeReducer action 全集：
 | 导航 | `navHistory`/`navIndex`，每工作组独立栈存 `navStoreRef`；`guideFocusPath` |
 | 选中与目标 | `targetSessionIdRef` 目标 Session ID；`contextSessionRef`/`contextNodeRef` 右键菜单目标；`renameTargetRef` inline 重命名目标；`presetSystemRef` 五预设 system 一次性传递 |
 | 编辑与预览 | `editingEntry`、`renamingNodeId`、`fillValue`、`previewTitle`/`previewContent`、`hoverTermPreview*` 三件套 |
-| 输入草稿 | InputBar 内部 value 以追加目标身份作 `key`（导图=guideFocusPath、外层=Node id、内层/整树=activeTag 的 sessionId），目标变化 remount 清空本地草稿；`fillValue` 仅程序化填充（划词追问/加号预设）时非空，各目标切换点同步清空防残留；`forkScrollTick` 触发 fork 后对 `.tree-node-selected` 滚动定位 |
+| 输入草稿 | InputBar 内部 value 以追加目标身份作 `key`（导图=guideFocusPath、外层=Node id、内层=activeTag 的 sessionId），目标变化 remount 清空本地草稿；`fillValue` 仅程序化填充（划词追问/加号预设）时非空，各目标切换点同步清空防残留；`forkScrollTick` 触发 fork 后对 `.tree-node-selected` 滚动定位 |
 | 滚动位置记忆 | `src/services/scrollMemory.ts` 模块级仅存内存：长 entry 内容滚动盒的 scrollTop 以 entry 对象为键存 WeakMap，NodeView 内容块挂载时恢复；树/TOC 容器 scrollTop 以视图槽位字符串为键存 Map，page.tsx 的 ScrollingPane 在挂载或槽位切换时恢复。长块在流式转 done 的首次限高时锚到内容顶部 |
 | 流式 | `streamingAbortRef`：AbortController，新流启动时 abort 旧流并真正取消其底层 fetch，旧 entry 置 done 保留部分内容 |
 | PDF | `storedFiles`、`activePdf`、`pdfBoundNode`/`pdfBoundNodeRef`、`pdfBindingsRef`；绑定持久化到 localStorage `pdf_bindings` |
@@ -79,15 +79,15 @@ nodeReducer action 全集：
 ```
 showGuideMap → GuideMapCanvas  组合视图
 showTOC && node → SessionTOC  外层会话目录
-node → NodeView                内层工作区或整树
+node → NodeView                内层工作区
 否则 → Onboarding
 ```
 
 
 - 聚焦 Node 后 `showTOC=true` 默认落外层会话目录。目录中根 Session 卡片展示段摘要。
 - 点击根 Session 进入内层：`setInnerSessionId(根.id)` + 选中该 Session。点击任意深度子 Session/摘要时先 `findRootSessionOf` 上溯到所属根、`expandPathToSession` 就地展开路径、再进内层。
-- NodeView 以 `focusedSessionId=innerSessionId` 只渲染单一根 Session 树，不渲染 Node 顶行、不堆叠其他根 Session；`innerSessionId` 为空时渲染完整 Node 树。
-- Esc：内层退回外层目录并重置 `targetSessionIdRef` 与 tag；组合视图沿面包屑退回。切工作组或删节点时重置 `innerSessionId`。
+- NodeView 以 `focusedSessionId=innerSessionId` 只渲染单一根 Session 工作区，不渲染 Node 顶行、不堆叠其他根 Session。
+- Esc 语义与重置行为见 CONVENTIONS「导航与视图」。切工作组或删节点时重置 `innerSessionId`。
 - 导航历史 `NavEntry` 联合类型：tree/session/guideMap，每工作组独立。返回/前进为按钮 + Alt+←/→，无下拉。`applyNavEntry` 统一回放：tree 落外层目录、session 回内层对应 Session、guideMap 回组合视图。侧栏节点点击与导航回放分别以 `silent` 控制是否推历史。
 
 ## 消息上下文构建
@@ -101,7 +101,7 @@ node → NodeView                内层工作区或整树
 3. 当前 Session 的前序 entries。
 4. 当前 userInput。
 
-消息映射：`qa` 为 user/assistant 消息对；`note` 为 `[笔记] xxx` user 消息；`summary` 条目在回放中跳过。
+消息映射：`qa` 为 user/assistant 消息对；`note` 为 `[The user puts a note here] xxx` user 消息；`summary` 条目在回放中跳过。Entry→消息由 `appendEntryMessages` 实现，会话/祖先区间回放由 `appendSessionMessages` 实现，普通问答与段摘要共用。
 
 祖先链折叠：沿链上溯时若某层 fork 源是 summary，则该层之上的祖先被摘要折叠，只以 `[摘要] 种子` user 消息继承，不再上溯。种子之后有中间祖先层时按普通 fork 语义带边界标记重放。
 
@@ -113,7 +113,36 @@ node → NodeView                内层工作区或整树
 - summary 紧跟其所属 fork entry 之后生成，生成后置于该位置。
 - 段摘要只消费模型流式输出的 `content`，不消费 reasoning。
 - summary 不进入上下文传递；仅当作为某子会话的 fork 源时折叠为 `[摘要]` 种子。
+- 摘要请求上下文 = 祖先链 + 当前 session 前缀（跳过 summary），与同会话普通问答同构以命中上下文缓存；目标段由 `summaryPrompt(anchor)` 引用段内首个非 summary 条目的开头文本锚定，不在消息流插入边界标记。
 - `collectSegmentSummaries(node)` 递归收集全部 summary 供外层目录展示。
+
+## 文件职责
+
+| 文件 | 职责 |
+|---|---|
+| `src/app/page.tsx` | 主组件：全部 handler、状态、快捷键、生命周期、上下文构建 |
+| `src/app/layout.tsx` | 根布局：主题初始化与首帧防闪 |
+| `src/components/SessionTOC.tsx` | 外层会话目录：根 Session 卡片、递归段摘要、跳转内层 |
+| `src/components/NodeView.tsx` | 内层工作区：单一根 Session 树、折叠/展开、fork、行内操作、编辑 |
+| `src/components/NodeLibrary.tsx` | 节点库侧栏：按内容更新时间降序排列、搜索、增删改、聚焦 |
+| `src/components/GuideMapCanvas.tsx` | 组合视图：DnD 拖拽组合、面包屑、图节点递归渲染 |
+| `src/components/InputBar.tsx` | tag 驱动输入框与 Enter 逻辑 |
+| `src/components/SettingsPanel.tsx` | 设置对话框 |
+| `src/components/FilesList.tsx` / `PDFViewer.tsx` | 文件列表、PDF 阅读与页面绑定 |
+| `src/components/MarkdownRenderer.tsx` / `TermText.tsx` / `HoverPreview.tsx` | Markdown 渲染、[[术语]] 标注、悬停预览 |
+| `src/components/ContextMenu.tsx` / `PlusMenu.tsx` / `ThemeMenu.tsx` / `PreviewPanel.tsx` / `Onboarding.tsx` / `WorkGroupSwitcher.tsx` | 右键菜单、加号菜单、主题三态、预览面板、空态引导、工作组切换 |
+| `src/store/nodeStore.ts` | Node/Session/Entry reducer 与 create 工厂 |
+| `src/store/configStore.ts` | Zustand：LLM 配置、预设提示词、菜单项 |
+| `src/services/cache.ts` | IndexedDB CRUD 与数据迁移 |
+| `src/services/contextBuilder.ts` | fork 祖先链与消息数组构建，段摘要共用 |
+| `src/services/segments.ts` | 段几何纯函数 |
+| `src/services/scrollMemory.ts` | 长 entry 内容滚动盒与树/目录容器 scrollTop 的瞬时记忆，仅存内存 |
+| `src/services/llm.ts` | SSE 流式调用，消息数组版含 reasoning |
+| `src/services/prompts.ts` | 预设提示词 |
+| `src/services/termParser.ts` | [[术语]] 占位符编码与自由术语匹配 |
+| `src/types/index.ts` | 全部类型定义 |
+| `src/lib/constants.ts` / `NodeListContext.ts` / `utils.ts` | 默认配置与常量、节点列表 Context、cn 工具 |
+| `src/components/ui/` | shadcn/ui 基元 |
 
 ## 组件树
 

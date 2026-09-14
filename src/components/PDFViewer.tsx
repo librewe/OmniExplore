@@ -113,7 +113,8 @@ export function PDFViewer({ data, fileName, onClose, onSelectionContextMenu, onC
         setScale((s) => Math.max(0.5, Math.min(3, s - e.deltaY * 0.001)));
       }
     };
-    const handleMouseUp = () => {
+    const handleMouseUp = (e: MouseEvent) => {
+      if (e.button !== 0) return;
       const sel = window.getSelection()?.toString().trim();
       if (sel) {
         const range = window.getSelection()?.getRangeAt(0);

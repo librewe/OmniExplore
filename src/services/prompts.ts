@@ -71,10 +71,12 @@ ${TERM_ANNOTATION_RULE}`,
  * 段摘要的总结指令。
  * 作为消息数组的**最后一条 user 消息**追加在对话内容之后（而非 system），
  * 使 system + 对话前序与同会话的普通问答请求前缀一致，可命中上下文缓存；
- * 语言跟随对话内容，不预设场景。
+ * 目标段由指令中引用的起点文本锚定，语言跟随对话内容，不预设场景。
  */
-export function summaryPrompt(): string {
-  return "请用简洁的语言总结自上次fork以来的对话片段的核心内容（30-80字），用于目录导航。不要客套，直接输出摘要正文。";
+export function summaryPrompt(anchor?: string): string {
+  return anchor
+    ? `请总结自「${anchor}」一处起至此的对话片段内容（30-80字），用于目录导航。直接输出摘要正文。`
+    : `请总结全部对话内容（30-80字），用于目录导航。直接输出摘要正文。`;
 }
 
 export function loadInquirySystemPrompt(): string | null {

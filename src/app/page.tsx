@@ -18,11 +18,11 @@ import { HoverPreview } from "@/components/HoverPreview";
 import { initializeConfig, useConfigStore } from "@/store/configStore";
 import { getAllWorkGroups, putWorkGroup, deleteWorkGroup as deleteWG, getAllFiles, putFile, deleteFile, getAllNodes, putNode, deleteNode, migrateData } from "@/services/cache";
 import { streamLLMChat, LLMError } from "@/services/llm";
-import { buildMessages, buildForkChain, isSummaryEntry } from "@/services/contextBuilder";
+import { buildMessages, buildForkChain, isSummaryEntry, appendSessionMessages } from "@/services/contextBuilder";
 import { rememberTreeScroll, readTreeScroll } from "@/services/scrollMemory";
 import { cn } from "@/lib/utils";
 import { Layers, ChevronRight, Search, Plus, Pencil, Trash2, Copy, GitBranch, ArrowLeft, List } from "lucide-react";
-import { DEFAULT_PLUS_TEMPLATES, DEFAULT_SELECTION_TEMPLATES } from "@/lib/constants";
+import { DEFAULT_PLUS_TEMPLATES, DEFAULT_SELECTION_TEMPLATES, DEFAULT_LLM_CONFIG } from "@/lib/constants";
 import { defaultPrompt, intuitionPrompt, definitionPrompt, applicationPrompt, motivationPrompt, loadCustomPresetPrompts, summaryPrompt, DEFAULT_SYSTEM_PROMPT } from "@/services/prompts";
 import { segmentRange, applyForkSplit, findLastSummaryFor } from "@/services/segments";
 import type {
@@ -206,12 +206,11 @@ export default function Home() {
     }
     for (const s of node.sessions) walk(s);
   }, []);
-  const [contextTarget, setContextTarget] = useState<{ type: "node"; id: string } | { type: "session"; id: string } | { type: "entry"; entry: Entry } | null>(null);
+  const [contextTarget, setContextTarget] = useState<{ type: "session"; id: string } | { type: "entry"; entry: Entry } | null>(null);
   const [contextPos, setContextPos] = useState({ x: 0, y: 0 });
-  const closeContext = useCallback(() => { setContextTarget(null); contextSessionRef.current = null; contextNodeRef.current = null; }, []);
+  const closeContext = useCallback(() => { setContextTarget(null); contextSessionRef.current = null; }, []);
   const contextSessionRef = useRef<Session | null>(null);
-  const contextNodeRef = useRef<Node | null>(null);
-  const renameTargetRef = useRef<{ type: "node"; node: Node } | { type: "session"; session: Session } | null>(null);
+  const renameTargetRef = useRef<{ type: "session"; session: Session } | null>(null);
   const [renamingNodeId, setRenamingNodeId] = useState<string | null>(null);
   const streamingAbortRef = useRef<AbortController | null>(null);
   const presetSystemRef = useRef<string | null>(null);
@@ -372,10 +371,18 @@ export default function Home() {
     const seq = ++nodeListLoadSeqRef.current;
     const nodes = await getAllNodes(groupId);
     if (seq !== nodeListLoadSeqRef.current) return;
-    const normSession = (s: Session): Session => ({
-      ...s,
-      entries: s.entries.map(e => ({ ...e, children: (e.children || []).map(normSession) })),
-    });
+    function normEntry(e: Entry): Entry {
+      const entry = { ...e, children: (e.children || []).map(normSession) };
+      // 摘要生成不跨刷新存活：读回的非终态一律视为已中断，避免永久转圈
+      if (entry.type === "summary" && (entry.summaryStatus === "loading" || entry.summaryStatus === "streaming")) {
+        entry.summaryStatus = entry.userInput ? "done" : "error";
+        if (!entry.userInput) entry.errorMessage = "摘要生成中断";
+      }
+      return entry;
+    }
+    function normSession(s: Session): Session {
+      return { ...s, entries: s.entries.map(normEntry) };
+    }
     const normalized = nodes.map(n => ({ ...n, sessions: n.sessions.map(normSession) }));
     setNodeList(normalized);
   }, []);
@@ -608,20 +615,11 @@ export default function Home() {
       }
 
       const messages: { role: string; content: string }[] = [{ role: "system", content: DEFAULT_SYSTEM_PROMPT }];
-      // 祖先链上溯到根/摘要种子（summary 总结也需完整上下文，与普通问答一致）
       buildForkChain(session, (id) => findSessionInTree(id), messages);
-      for (let i = segment.start; i <= segment.end; i++) {
-        const e = session.entries[i];
-        if (!e || e.type === "summary") continue;
-        if (e.type === "note") {
-          messages.push({ role: "user", content: `[笔记] ${e.userInput}` });
-        } else {
-          messages.push({ role: "user", content: e.userInput });
-          if (e.assistantOutput) messages.push({ role: "assistant", content: e.assistantOutput });
-        }
-      }
-      // 总结指令作为最后一条 user 消息，保持与普通问答一致的 system 前缀以命中上下文缓存
-      messages.push({ role: "user", content: summaryPrompt() });
+      appendSessionMessages(messages, session, segment.end);
+      const segmentHead = session.entries.slice(segment.start, segment.end + 1).find((e) => e.type !== "summary");
+      const anchor = segmentHead?.userInput.trim().slice(0, 50).replace(/\n/g, " ").trim() || undefined;
+      messages.push({ role: "user", content: summaryPrompt(anchor) });
 
       try {
         console.log(`[OmniExplore] LLM summary request (${messages.length} msgs):`, JSON.stringify(messages, null, 2));
@@ -631,6 +629,8 @@ export default function Home() {
           if (chunk.content) accumulated += chunk.content;
           dispatchNode({ type: "SET_ENTRY_SUMMARY", entry: summaryEntry, content: accumulated });
         }
+        summaryEntry.userInput = accumulated;
+        summaryEntry.summaryStatus = "done";
         dispatchNode({ type: "SET_ENTRY_SUMMARY_STATUS", entry: summaryEntry, status: "done" });
         session.updated_at = Date.now();
         await putNode(nodeRef.current!);
@@ -638,6 +638,8 @@ export default function Home() {
       } catch (err) {
         console.error("[OmniExplore] summary generation error:", err);
         const message = err instanceof LLMError ? err.message : "摘要生成失败";
+        summaryEntry.summaryStatus = "error";
+        summaryEntry.errorMessage = message;
         dispatchNode({ type: "SET_ENTRY_SUMMARY_STATUS", entry: summaryEntry, status: "error", errorMessage: message });
         session.updated_at = Date.now();
         await putNode(nodeRef.current!);
@@ -676,14 +678,6 @@ export default function Home() {
     dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: session.id, title: session.title });
     return session;
   }, []);
-
-  const handleCreateRootSession = useCallback(async () => {
-    const session = await createRootSession("新分支");
-    if (session) {
-      renameTargetRef.current = { type: "session", session };
-      setRenamingNodeId(session.id);
-    }
-  }, [createRootSession]);
 
   const handleCreateEntry = useCallback(async (userInput: string) => {
     const text = userInput.trim();
@@ -725,6 +719,29 @@ export default function Home() {
       await putNode(nodeRef.current!);
     }
   }, [config, isConfigured, handleStreamEntry, findSessionInTree, createRootSession, showTOC]);
+
+  const handleCreateNoteEntry = useCallback(async (userInput: string) => {
+    const text = userInput.trim();
+    if (!text) return;
+    let s: Session | null | undefined = findSessionInTree(targetSessionIdRef.current ?? "");
+    if (!s) {
+      const node = nodeRef.current;
+      if (!node) return;
+      const title = text.split("\n")[0].slice(0, 30) || "新分支";
+      s = await createRootSession(title);
+      if (!s) return;
+      if (showTOC) {
+        setShowTOC(false);
+        setInnerSessionId(s.id);
+      }
+    }
+    const entry = createEntry("note", text);
+    entry.expanded = true;
+    s.entries = [...s.entries, entry];
+    s.updated_at = Date.now();
+    dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
+    await putNode(nodeRef.current!);
+  }, [findSessionInTree, createRootSession, showTOC]);
 
   const handleToggleEntryExpand = useCallback(async (session: Session, entry: Entry) => {
     entry.expanded = !entry.expanded;
@@ -877,11 +894,9 @@ export default function Home() {
   }, [closeSegmentAndSummarize, handleSelectSession]);
 
   const handleSessionContextMenu = useCallback((e: React.MouseEvent, session: Session) => { e.preventDefault(); contextSessionRef.current = session; setContextTarget({ type: "session", id: session.id }); setContextPos({ x: e.clientX, y: e.clientY }); }, []);
-  const handleNodeContextMenu = useCallback((e: React.MouseEvent, node: Node) => { e.preventDefault(); contextNodeRef.current = node; setContextTarget({ type: "node", id: node.id }); setContextPos({ x: e.clientX, y: e.clientY }); }, []);
   const handleEntryContextMenu = useCallback((e: React.MouseEvent, session: Session, entry: Entry) => { e.preventDefault(); contextSessionRef.current = session; setContextTarget({ type: "entry", entry }); setContextPos({ x: e.clientX, y: e.clientY }); }, []);
 
   const handleRenameSession = useCallback((session: Session) => { renameTargetRef.current = { type: "session", session }; setRenamingNodeId(session.id); }, []);
-  const handleRenameNode = useCallback((node: Node) => { renameTargetRef.current = { type: "node", node }; setRenamingNodeId(node.id); }, []);
 
   const removeFromGuideMap = useCallback((nodeId: string) => {
     if (!activeGroupId || !nodeId) return;
@@ -901,22 +916,6 @@ export default function Home() {
   }, [activeGroupId, workGroups]);
 
   const handleDeleteNodeFromMenu = useCallback(async (targetId: string) => {
-    const target = contextTarget;
-    if (!target) return;
-    if (target.type === "node") {
-      const n = contextNodeRef.current;
-      if (!n) return;
-      await deleteNode(n.id);
-      setNodeList(prev => prev.filter(x => x.id !== n.id));
-      removeFromGuideMap(n.id);
-      if (nodeState.node?.id === n.id) {
-        dispatchNode({ type: "CLEAR_NODE" });
-        setInnerSessionId(null);
-        setPreviewTitle(""); setPreviewContent(null);
-      }
-      closeContext();
-      return;
-    }
     const s = contextSessionRef.current;
     if (!s) return;
     if (s.parentSessionId) {
@@ -944,7 +943,7 @@ export default function Home() {
       }
     }
     closeContext();
-  }, [nodeState.node, nodeState.activeTag.sessionId, contextTarget, closeContext, removeFromGuideMap]);
+  }, [nodeState.activeTag.sessionId, closeContext]);
 
   function removeChildNode(node: Node, childId: string): boolean {
     const rootIdx = node.sessions.findIndex(s => s.id === childId);
@@ -983,38 +982,17 @@ export default function Home() {
     if (!title.trim()) { setRenamingNodeId(null); return; }
     const target = renameTargetRef.current;
     if (!target) { setRenamingNodeId(null); return; }
+    const s = target.session;
     const newTitle = title.trim();
-    if (target.type === "node") {
-      const n = target.node;
-      const oldTitle = n.title;
-      if (oldTitle === newTitle) { setRenamingNodeId(null); return; }
-      n.title = newTitle;
-      n.updated_at = Date.now();
-      await putNode(n);
-      setNodeList(prev => prev.map(x => x.id === n.id ? n : x));
-      if (nodeState.node?.id === n.id) {
-        dispatchNode({ type: "RENAME_NODE", title: newTitle });
-        dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: n.id, title: newTitle });
-        updateGuideMapTerm(n.id, newTitle);
-        if (pdfBoundNodeRef.current === oldTitle) {
-          setPdfBoundNode(newTitle);
-          pdfBindingsRef.current.forEach((v, k) => { if (v === oldTitle) pdfBindingsRef.current.set(k, newTitle); });
-          saveBindings();
-        }
-        setPreviewTitle(newTitle);
-      }
-    } else {
-      const s = target.session;
-      s.title = newTitle;
-      s.updated_at = Date.now();
-      await putNode(nodeRef.current!);
-      dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
-      if (targetSessionIdRef.current === s.id) {
-        dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: s.id, title: newTitle });
-      }
+    s.title = newTitle;
+    s.updated_at = Date.now();
+    await putNode(nodeRef.current!);
+    dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
+    if (targetSessionIdRef.current === s.id) {
+      dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: s.id, title: newTitle });
     }
     setRenamingNodeId(null);
-  }, [nodeState.node, updateGuideMapTerm, saveBindings]);
+  }, []);
 
   const findSessionForEntry = useCallback((entry: Entry): Session | undefined => {
     const node = nodeRef.current;
@@ -1078,16 +1056,25 @@ export default function Home() {
     setFillValue(question);
   }, [findSessionForEntry, closeSegmentAndSummarize]);
 
-  // 划词菜单：由划词（mouseup）自动触发，右键恢复浏览器默认行为。
-  // selectionMenuRef 持有当前菜单元素，selectionMenuTextRef 记录已弹出菜单对应的选中文本，
-  // 用于防重弹：点击外部关闭菜单时 mouseup 先于 click 触发，此时若文本相同直接忽略，交由随后的 click 关闭。
+  // 划词菜单：由划词（mouseup）自动触发，右键恢复浏览器默认行为；selectionMenuTextRef 记录当前菜单文本用于防重弹。
   const selectionMenuRef = useRef<HTMLDivElement | null>(null);
   const selectionMenuTextRef = useRef<string>("");
+  const selectionMenuCleanupRef = useRef<(() => void) | null>(null);
+
+  const closeSelectionMenu = useCallback(() => {
+    const menu = selectionMenuRef.current;
+    if (!menu) return;
+    menu.remove();
+    selectionMenuRef.current = null;
+    selectionMenuTextRef.current = "";
+    selectionMenuCleanupRef.current?.();
+    selectionMenuCleanupRef.current = null;
+  }, []);
 
   const handleSelectionContextMenu = useCallback(
     (selectedText: string, entry: Entry | null, rect: { left: number; bottom: number }) => {
       if (selectionMenuRef.current && selectionMenuTextRef.current === selectedText) return;
-      if (selectionMenuRef.current) selectionMenuRef.current.remove();
+      closeSelectionMenu();
       const menu = document.createElement("div");
       menu.className = "fixed z-50 min-w-[180px] rounded-md border bg-popover p-1 shadow-md";
       menu.style.left = `${rect.left}px`;
@@ -1096,7 +1083,7 @@ export default function Home() {
       const focusBtn = document.createElement("button");
       focusBtn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
       focusBtn.innerHTML = "<span>🎯</span> <span>聚焦</span>";
-      focusBtn.onclick = () => { menu.remove(); handleFocusNode(selectedText); };
+      focusBtn.onclick = () => { closeSelectionMenu(); handleFocusNode(selectedText); };
       menu.appendChild(focusBtn);
 
       selectionMenuItems.forEach((item) => {
@@ -1104,7 +1091,7 @@ export default function Home() {
         btn.className = "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent";
         btn.innerHTML = `<span>💬</span> <span>${item.label}</span>`;
         btn.onclick = () => {
-          menu.remove();
+          closeSelectionMenu();
           const rootTerm = nodeState.node?.title ?? "";
           const label = item.prompt
             .replace(/\$\{selected\}/g, selectedText)
@@ -1118,19 +1105,32 @@ export default function Home() {
       document.body.appendChild(menu);
       selectionMenuRef.current = menu;
       selectionMenuTextRef.current = selectedText;
-      const close = (ev: MouseEvent) => {
-        if (!menu.contains(ev.target as HTMLElement)) {
-          menu.remove();
-          if (selectionMenuRef.current === menu) {
-            selectionMenuRef.current = null;
-            selectionMenuTextRef.current = "";
-          }
-          document.removeEventListener("click", close);
-        }
+
+      const onPointerDown = (ev: MouseEvent) => {
+        if (!menu.contains(ev.target as globalThis.Node)) closeSelectionMenu();
       };
-      setTimeout(() => document.addEventListener("click", close), 0);
+      const onScroll = () => closeSelectionMenu();
+      const onContextMenu = () => closeSelectionMenu();
+      const onKeyDown = (ev: KeyboardEvent) => {
+        if (ev.key !== "Escape" || !selectionMenuRef.current) return;
+        ev.stopPropagation();
+        closeSelectionMenu();
+      };
+      const onResize = () => closeSelectionMenu();
+      document.addEventListener("mousedown", onPointerDown);
+      window.addEventListener("scroll", onScroll, true);
+      document.addEventListener("contextmenu", onContextMenu, true);
+      document.addEventListener("keydown", onKeyDown, true);
+      window.addEventListener("resize", onResize);
+      selectionMenuCleanupRef.current = () => {
+        document.removeEventListener("mousedown", onPointerDown);
+        window.removeEventListener("scroll", onScroll, true);
+        document.removeEventListener("contextmenu", onContextMenu, true);
+        document.removeEventListener("keydown", onKeyDown, true);
+        window.removeEventListener("resize", onResize);
+      };
     },
-    [handleFocusNode, selectionMenuItems, nodeState.node?.title, handleSelectionAsk]
+    [closeSelectionMenu, handleFocusNode, selectionMenuItems, nodeState.node?.title, handleSelectionAsk]
   );
 
   const handleTermHover = useCallback(
@@ -1540,6 +1540,10 @@ export default function Home() {
           handleFocusNode(text);
         }
       }}
+      showModeSwitch={showTOC && !showGuideMap}
+      modelLabel={config?.model || DEFAULT_LLM_CONFIG.model}
+      notePlaceholder="写下一条笔记…"
+      onCreateNote={handleCreateNoteEntry}
     />
   );
 
@@ -1555,11 +1559,6 @@ export default function Home() {
           const entries = s?.entries ?? [];
           const isLast = entries.length > 0 && entries[entries.length - 1] === (contextTarget as { type: "entry"; entry: Entry }).entry;
           const editable = !isSession && isLast && !("entry" in contextTarget ? contextTarget.entry.assistantOutput : true);
-          const nodeItems = [
-            { icon: <Plus className="w-4 h-4" />, label: "新建根会话", onClick: () => { handleCreateRootSession(); closeContext(); } },
-            { icon: <Pencil className="w-4 h-4" />, label: "重命名", onClick: () => { const n = contextNodeRef.current; if (n) handleRenameNode(n); closeContext(); } },
-            { icon: <Trash2 className="w-4 h-4" />, label: "删除", onClick: () => { handleDeleteNodeFromMenu((contextTarget as { type: "node"; id: string }).id); }, danger: true },
-          ];
           const sessionItems = [
             { icon: <Plus className="w-4 h-4" />, label: "新增上下文", onClick: () => { const s = contextSessionRef.current; if (s) { const entry = createEntry("note", ""); entry.expanded = true; s.entries = [...s.entries, entry]; s.updated_at = Date.now(); putNode(nodeRef.current!); dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! }); setEditingEntry(entry); } closeContext(); } },
             { icon: <Pencil className="w-4 h-4" />, label: "重命名", onClick: () => { const s = contextSessionRef.current; if (s) handleRenameSession(s); closeContext(); } },
@@ -1579,7 +1578,7 @@ export default function Home() {
             x={contextPos.x}
             y={contextPos.y}
             onClose={closeContext}
-            items={isSession ? sessionItems : (contextTarget.type === "node" ? nodeItems : entryItems)}
+            items={isSession ? sessionItems : entryItems}
           />
           );
         })()}
@@ -1637,7 +1636,7 @@ export default function Home() {
           <div className="flex-1 overflow-hidden px-4">
             {leftTab === "nodes" ? (
             <NodeLibrary
-              nodeTitles={nodeList.map(n => n.title)}
+              nodes={nodeList}
               currentNodeTitle={nodeState.node?.title ?? ""}
               search={leftTab === "nodes" && sidebarSearch ? sidebarSearch : undefined}
               onNodeClick={(term) => {
@@ -1942,6 +1941,9 @@ export default function Home() {
                       />
                     </div>
                   </div>
+                  <div className="sticky bottom-0 z-50 shrink-0">
+                    {inputBar}
+                  </div>
                 </div>
               </ScrollingPane>
             ) : nodeState.node ? (
@@ -1954,26 +1956,27 @@ export default function Home() {
                         focusedSessionId={innerSessionId}
                         selectedEntry={nodeState.selectedEntry}
                         selectedSession={nodeState.selectedSession}
-                        onSelectNode={() => handleSelectSession(null)}
                         onSelectSession={handleSelectSession}
                         onToggleExpand={handleToggleEntryExpand} onSelect={handleSelectEntry}
-                        onSessionContextMenu={handleSessionContextMenu} onNodeContextMenu={handleNodeContextMenu} onEntryContextMenu={handleEntryContextMenu}
+                        onSessionContextMenu={handleSessionContextMenu} onEntryContextMenu={handleEntryContextMenu}
                         onSelectionContextMenu={handleSelectionContextMenu}
                         onTermDoubleClick={handleFocusNode} onTermHover={handleTermHover} onTermLeave={handleTermLeave} onFileLink={handleFileLink}
                         onPlusSelect={handlePlusSelect} onCreateEmptyEntry={handleCreateEmptyEntry}
-                        onCreateRootSession={handleCreateRootSession}
                         onNodeFocus={(session, title) => {
                           setFillValue("");
                           dispatchNode({ type: "SET_ACTIVE_TAG", sessionId: session.id, title });
                           targetSessionIdRef.current = session.id;
                         }}
                         onEditEntry={(session, entry) => setEditingEntry(entry)} onCopyEntry={handleCopyEntry} onDeleteEntry={handleDeleteEntry} onForkEntry={handleForkEntry}
-                        onRenameSession={handleRenameSession} onRenameNode={handleRenameNode} onDeleteNode={handleDeleteNodeFromMenu}
+                        onRenameSession={handleRenameSession} onDeleteNode={handleDeleteNodeFromMenu}
                         plusItems={subPlusMenuItems} rootPlusItems={rootPlusMenuItems} editingEntry={editingEntry} renamingNodeId={renamingNodeId}
                         onEditingChange={handleEditingChange} onEditSubmit={handleEditSubmit} onNodeRenameSubmit={handleNodeRenameSubmit}
                         onEditSummary={handleEditSummary} onRegenerateSummary={regenerateSummary}
                       />
                     </div>
+                  </div>
+                  <div className="sticky bottom-0 z-50 shrink-0" onClick={(e) => e.stopPropagation()}>
+                    {inputBar}
                   </div>
                 </div>
               </ScrollingPane>
@@ -1986,7 +1989,7 @@ export default function Home() {
               />
             )}
 
-            {showGuideMap || nodeState.node ? inputBar : null}
+            {showGuideMap ? inputBar : null}
           </div>
         </main>
 

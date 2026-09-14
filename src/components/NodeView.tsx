@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { ChevronRight, Loader2, AlertCircle, GitBranch, Plus, Pencil, RefreshCw, Copy, Undo2 } from "lucide-react";
+import { ChevronRight, Loader2, AlertCircle, GitBranch, Pencil, RefreshCw, Copy, Undo2 } from "lucide-react";
 import type { Node, Session, Entry, NodeStatus, PlusMenuItem } from "@/types";
 import { TermText } from "./TermText";
 import { PlusMenu } from "./PlusMenu";
@@ -10,7 +10,8 @@ import { rememberEntryScroll, readEntryScroll } from "@/services/scrollMemory";
 
 /** 层级粘滞滚动：行秩连续计数（Node=0 → 根 Session=1 → 其 entry=2 → 子 Session=3 …），sticky top = 行秩 × ROW_H。ROW_H 与实测行高一致（约 30px），粘滞时行间紧贴、互不遮挡、无缝隙透出 */
 const ROW_H = 30;
-const STICKY_BG = "hsl(var(--background))";
+/** 吸顶行统一层叠级：DOM 靠后的行盖住前行投下的行底阴影，阴影只落在内容上、不落在行间 */
+const STICKY_Z = 20;
 const STICKY_BG_SELECTED = "hsl(var(--accent))";
 /** 父链弱高亮背景：不透明极淡蓝（95% 背景色 + 5% primary，亮度高于选中行的 accent 底色），避免粘滞滚动时半透明透底 */
 const STICKY_BG_ANCESTOR = "color-mix(in srgb, hsl(var(--background)) 95%, hsl(var(--primary)) 5%)";
@@ -80,6 +81,24 @@ function EntryRow({
   const scrollCapped =
     isExpanded && !isSummary && !isEditing && !isStreaming && (entry.type === "note" || !!entry.assistantOutput);
 
+  // 内容溢出（出现内滚）时才启用底缘淡出 mask
+  const [boxOverflow, setBoxOverflow] = useState(false);
+  useEffect(() => {
+    const el = scrollBoxRef.current;
+    if (!scrollCapped || !el) {
+      setBoxOverflow(false);
+      return;
+    }
+    const measure = () => {
+      const overflowing = el.scrollHeight > el.clientHeight + 1;
+      setBoxOverflow((prev) => (prev === overflowing ? prev : overflowing));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [scrollCapped, entry, isExpanded]);
+
   useLayoutEffect(() => {
     const el = scrollBoxRef.current;
     if (!el) return;
@@ -106,12 +125,15 @@ function EntryRow({
   const rowRank = depth * 2 - (stickyRankOffset ?? 0);
   // 段摘要属于 fork entry 的内容附属行：不参与粘滞，避免与所属 entry 同 rank 同 top 吸顶时盖在 entry 粘滞行之上
   const rowStyle: React.CSSProperties = isSummary
-    ? { backgroundColor: isSelected ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : undefined) }
+    ? { backgroundColor: isSelected ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : undefined),
+        boxShadow: "0 2px 5px -3px hsl(var(--foreground) / 0.18)",
+      }
     : {
         position: "sticky",
         top: rowRank * ROW_H,
-        zIndex: Math.max(10, 40 - rowRank),
-        backgroundColor: isSelected ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : STICKY_BG),
+        zIndex: STICKY_Z,
+        backgroundColor: isSelected ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : undefined),
+        boxShadow: "0 2px 5px -2px hsl(var(--foreground) / 0.18)",
       };
 
   const firstLine = entry.userInput.split("\n")[0];
@@ -128,7 +150,7 @@ function EntryRow({
         className="absolute left-0 top-[15px] bottom-0 w-px pointer-events-none"
         style={{ zIndex: 1, backgroundColor: "hsl(var(--border))" }}
       />
-      <div className={cn("tree-node-row group flex items-start gap-1 py-0.5 rounded-md transition-colors cursor-default", isSelected && "tree-node-selected")}
+      <div className={cn("tree-node-row group flex items-start gap-1 py-0.5 rounded-md transition-colors cursor-default", isSummary ? "hover:bg-muted/50" : "tree-row-sticky-surface", isSelected && "tree-node-selected")}
         style={rowStyle}
         onClick={(e) => { e.stopPropagation(); onSelect(entry); }}
         onDoubleClick={() => {
@@ -170,10 +192,11 @@ function EntryRow({
 
       {isExpanded && (entry.assistantOutput || entry.type === "note" || isSummary || isStreaming) && (
         <div ref={scrollBoxRef}
-          className={cn("ml-0 py-1 select-text", scrollCapped && "overflow-y-auto max-h-[60vh]")}
+          className={cn("ml-0 py-1 select-text", scrollCapped && "overflow-y-auto max-h-[60vh]", scrollCapped && boxOverflow && "entry-fade-mask")}
           style={{ paddingLeft: 20, paddingRight: 20 }}
           onScroll={scrollCapped ? (e) => rememberEntryScroll(entry, e.currentTarget.scrollTop) : undefined}
-          onMouseUp={() => {
+          onMouseUp={(e) => {
+            if (e.button !== 0) return;
             const sel = window.getSelection()?.toString().trim();
             if (sel) {
               const range = window.getSelection()?.getRangeAt(0);
@@ -200,7 +223,7 @@ function EntryRow({
           ) : (
             <>
               {entry.type !== "note" && entry.type !== "summary" && (
-                <div className="mb-2 rounded-lg bg-muted/50 px-3 py-2">
+                <div className="mb-1 rounded-lg bg-muted/50 px-3 py-1">
                   <TermText content={entry.userInput} onTermDoubleClick={onTermDoubleClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-foreground" />
                 </div>
               )}
@@ -242,13 +265,15 @@ function EntryRow({
                 ) : entry.userInput ? (
                   <div className="flex items-start gap-1.5">
                     <TermText content={entry.userInput} onTermDoubleClick={onTermDoubleClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-muted-foreground" />
-                    {entry.summaryStatus === "streaming" && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary shrink-0 mt-0.5" />}
+                    {summaryLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary shrink-0 mt-0.5" />}
                   </div>
-                ) : (
+                ) : summaryLoading ? (
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
                     <span>正在总结…</span>
                   </div>
+                ) : (
+                  <div className="text-sm italic text-muted-foreground">（空摘要）</div>
                 )
               ) : entry.assistantOutput ? (
                 <TermText content={entry.assistantOutput} onTermDoubleClick={onTermDoubleClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-foreground" />
@@ -324,13 +349,14 @@ function SessionView({ session, depth, nodeTitle, ...rest }: SessionViewProps) {
     : {
         position: "sticky",
         top: stickyRank * ROW_H,
-        zIndex: Math.max(10, 40 - stickyRank),
-        backgroundColor: rest.selectedSession === session && !rest.selectedEntry ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : STICKY_BG),
+        zIndex: STICKY_Z,
+        backgroundColor: rest.selectedSession === session && !rest.selectedEntry ? STICKY_BG_SELECTED : (isAncestor ? STICKY_BG_ANCESTOR : undefined),
+        boxShadow: "0 2px 5px -2px hsl(var(--foreground) / 0.18)",
       };
 
   return (
     <div className="select-none" style={{ paddingLeft: depth > 0 ? 20 : 0 }}>
-      <div className={cn("tree-node-row group flex items-start gap-1 py-0.5 rounded-md transition-colors cursor-default", rest.selectedSession === session && !rest.selectedEntry && "tree-node-selected")}
+      <div className={cn("tree-node-row group flex items-start gap-1 py-0.5 rounded-md transition-colors cursor-default", isInnerRoot ? "hover:bg-muted/50" : "tree-row-sticky-surface", rest.selectedSession === session && !rest.selectedEntry && "tree-node-selected")}
         style={rowStyle}
         onClick={(e) => { e.stopPropagation(); rest.onSelectSession(session); }}
         onContextMenu={(e) => { e.preventDefault(); rest.onSelectSession(session); rest.onSessionContextMenu(e, session); }}
@@ -412,69 +438,15 @@ function SessionView({ session, depth, nodeTitle, ...rest }: SessionViewProps) {
 
 interface NodeViewProps extends SharedHandlers {
   node: Node;
-  onSelectNode: () => void;
-  onNodeContextMenu: (e: React.MouseEvent, node: Node) => void;
-  onCreateRootSession: () => void;
-  onRenameNode: (node: Node) => void;
-  /** 内层模式：仅渲染该根 Session 的工作区（不渲染 Node 顶行，不堆叠其他根 Session）；null/undefined = 外层树视图 */
   focusedSessionId?: string | null;
 }
 
-export function NodeView({ node, onSelectNode, onNodeContextMenu, onCreateRootSession, onRenameNode, focusedSessionId, ...rest }: NodeViewProps) {
-  const [collapsed, setCollapsed] = useState(false);
-  const isRenamingNode = rest.renamingNodeId === node.id;
-  const isAncestor = node.sessions.some((s) => s === rest.selectedSession || subtreeContains(s, rest.selectedSession, rest.selectedEntry));
-
-  // 内层模式：单一根 Session 工作区（去 Node 标题、不堆叠会话），仅渲染 focusedSessionId 指定的会话；
-  // stickyRankOffset=1：无 Node 顶行占位，行秩整体减 1，避免首行 sticky 顶部空出一行高度
+export function NodeView({ node, focusedSessionId, ...rest }: NodeViewProps) {
   const focusedSession = focusedSessionId ? node.sessions.find((s) => s.id === focusedSessionId) : undefined;
-  if (focusedSessionId) {
-    if (!focusedSession) return <div className="select-none" />;
-    return (
-      <div className="select-none">
-        <SessionView key={focusedSession.id} session={focusedSession} depth={1} nodeTitle={node.title} stickyRankOffset={2} {...rest} />
-      </div>
-    );
-  }
-
+  if (!focusedSession) return <div className="select-none" />;
   return (
     <div className="select-none">
-      <div className="tree-node-row group flex items-start gap-1 py-0.5 rounded-md transition-colors cursor-default"
-        style={{ position: "sticky", top: 0, zIndex: 40, backgroundColor: isAncestor ? STICKY_BG_ANCESTOR : STICKY_BG }}
-        onClick={(e) => { e.stopPropagation(); onSelectNode(); }}
-        onContextMenu={(e) => { e.preventDefault(); onSelectNode(); onNodeContextMenu(e, node); }}
-      >
-        <div className="flex items-center gap-0.5 shrink-0 pt-0.5">
-          <div className="shrink-0 w-3 mt-0.5" />
-          <button onClick={(e) => { e.stopPropagation(); setCollapsed(!collapsed); }} className="shrink-0 p-0.5 rounded hover:bg-accent transition-colors">
-            <svg className={cn("w-3.5 h-3.5 text-muted-foreground transition-transform", !collapsed && "rotate-90")} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6" /></svg>
-          </button>
-          <div className="flex items-center gap-1 min-w-0">
-            {isRenamingNode ? (
-              <input defaultValue={node.title}
-                onKeyDown={(e) => { if (e.key === "Enter") rest.onNodeRenameSubmit(node.id, (e.target as HTMLInputElement).value); if (e.key === "Escape") rest.onNodeRenameSubmit(node.id, node.title); }}
-                onBlur={(e) => rest.onNodeRenameSubmit(node.id, e.target.value)}
-                className="h-6 rounded border border-input bg-background px-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring shrink-0" autoFocus onClick={(e) => e.stopPropagation()} />
-            ) : (
-              <span className="text-base font-medium truncate shrink-0 text-primary font-semibold"
-                onDoubleClick={(e) => { e.stopPropagation(); onRenameNode(node); }}>{node.title}</span>
-            )}
-            <div className="shrink-0">
-              <button
-                onClick={(e) => { e.stopPropagation(); setCollapsed(false); onCreateRootSession(); }}
-                className="inline-flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-                title="新建根会话"
-              >
-                <Plus className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {!collapsed && node.sessions.map((s) => (
-        <SessionView key={s.id} session={s} depth={1} nodeTitle={node.title} {...rest} />
-      ))}
+      <SessionView key={focusedSession.id} session={focusedSession} depth={1} nodeTitle={node.title} stickyRankOffset={2} {...rest} />
     </div>
   );
 }
