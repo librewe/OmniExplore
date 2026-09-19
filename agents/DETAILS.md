@@ -32,11 +32,11 @@
 
 ## 渲染与行操作
 
-- Entry 标题折叠与否均截断首行 30 字符；note 空内容显示「(双击或右键编辑)」。
-- 仅笔记与段摘要可双击编辑：`isEditable = entry.type === "note"`；标题行与内容区双击一致，命中 `.term-underline` 时让位。提问不参与双击编辑，须经撤回或右键「编辑」。
+- Entry 无独立标题行，行即 userInput；qa 的问题块始终渲染在限高 viewport 之外（折叠 `line-clamp-2`、展开用 `max-h-[7.5rem]` + 溢出测量 + 左下「展开/收起」），viewport 只含 reasoning + 回答，故折叠/展开问题不位移。note 空内容显示「(双击或右键编辑)」；全树无 emoji 图标。展开 chevron `absolute left-0 top-2 h-5 w-5` 与首行居中；行操作在内容末预留行（`h-[28.8px]`）、左对齐 `paddingLeft:20`、hover 显现，图标 `w-3.5`、热区 `h-5 w-5`（进行态/错误图标常显）。灰色缩进竖线 `absolute left-0 top-2 bottom-0 w-px`（`hsl(var(--border))`）跨整个 entry 内容（含问题区）。
+- 仅笔记与段摘要可双击编辑：`isEditable = entry.type === "note"`；命中 `.term-underline` 时让位。提问不参与双击编辑，须经撤回或右键「编辑」。
 - 撤回即编辑：textarea 以 `defaultValue` 复原 userInput，Ctrl+Enter 保存、Esc 取消、Ctrl+Z 原生 redo。
 - 编辑框挂载与输入时按 `scrollHeight` 自动增高，上限 `EDITOR_MAX_H=360px`，超出转框内滚动；样式 `resize-none overflow-hidden`。
-- summary 标题行固定「📝 段摘要」，有箭头可折叠，map 中不独立渲染避免重复。
+- summary 与普通 entry 同形（真实文本，无图标），可折叠，map 中不独立渲染避免重复。
 - summary 生成指示由 `summaryStatus` 驱动而非内容是否为空；终态无内容显示「（空摘要）」。
 - summary 支持编辑与重新生成，`summaryEdited=true` 后 AI 重新生成不得覆盖。
 - reasoning 渲染为可折叠「思考过程」块，默认收起，流式中显示 spinner。
@@ -47,13 +47,17 @@
 
 - 字号层级：正文 16px；h1 `text-xl`、h2 `text-lg`、h3 `text-[17px]`、h4/h5 `text-base`、h6 `text-sm`；table `text-sm`；行内 code `text-[13px]`；标题与表格禁用 `text-xs`。
 - 正文统一 `text-base`，行距 `leading-[1.8]` 必须放 `cn()` 末位：tailwind-merge 同组冲突后者覆盖前者，前置会被 `text-*` 覆盖删除。正确姿势 `cn("text-base", className, "leading-[1.8]")`。
-- 层级靠字重而非字号：Node semibold → Session medium → Entry regular；辅助信息 `text-xs`。
+- 层级靠字重而非字号：Node semibold → Entry regular；子 Session 标签为 `text-xs` muted 芯片。
 - 内容容器 `max-w-3.5xl`，左右内容内缩 20px。
 
 ## 粘滞滚动
 
-- sticky 行行秩从 Node=0 起连续计数，`top = 行秩 × 30px`；选中态实色背景，粘滞行背景用 CSS 变量与 `color-mix` 祖先高亮。
-- 根 Session 行不参与粘滞，其后代行秩相对其从 0 重算（`stickyRankOffset=2`）。
+- 内层 Session 标签（root 与子 `#N`）为悬浮 chip：粘滞锚点 `height:0`、`top:0`、`STICKY_Z=20`，chip 绝对定位 `-left-10 top-2`（`-40px` 让开 entry 的 chevron、`8px` 对齐首行）于节首行左端，不占行高；各层横向并排；root 可折叠。
+- 子标签文案由父 entry 的 `children` 序号派生 `#N`，root 标签固定 `root`；均不改 `session.title`。
+- 标签点击：折叠则先展开 + `onSelectSession` 设为追加目标 + 滚到该 Session 追加行（nonce 触发提交后 `scrollIntoView({block:"end"})`）。
+- 标签无渐隐遮罩，chip 恒为 `bg-muted text-muted-foreground`（自然宽度，无选中态；`.tree-node-selected` 仅作进入内层/fork 的滚动锚点，无样式）；不再有独立标签行。
+- Entry 行不粘滞，走普通流；外层目录粘滞仍按原行秩阶梯。
+- 已移除 `stickyRankOffset` 机制与 `.tree-row-sticky-surface`。
 
 ## Markdown 与术语
 
