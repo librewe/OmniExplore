@@ -27,14 +27,15 @@
 
 - 划词 mouseup 自动弹出菜单，默认模板「简单介绍」「指什么」「为什么」；点击后从源 entry fork 分支并填入输入框。
 - 防重弹：菜单元素与对应文本存 ref，同文本直接忽略；菜单位置取 `getRangeAt(0).getBoundingClientRect()` 而非鼠标坐标。
-- 菜单按基本菜单行为关闭：点击外部、滚动捕获、右键、Esc、窗口尺寸变化；划词仅主键 mouseup 触发。
+- 菜单按基本菜单行为关闭：点击外部、滚动捕获、右键、Esc、窗口尺寸变化；划词仅主键 mouseup 触发；笔记/段摘要编辑双击（`detail>=2`）时跳过弹菜单。
 - 无 entry 上下文的 PDF 划词回退到当前 Node 主题。
 
 ## 渲染与行操作
 
 - Entry 标题折叠与否均截断首行 30 字符；note 空内容显示「(双击或右键编辑)」。
-- 仅末位未响应 entry 可编辑：`isEditable = isLast && !assistantOutput`。
+- 仅笔记与段摘要可双击编辑：`isEditable = entry.type === "note"`；标题行与内容区双击一致，命中 `.term-underline` 时让位。提问不参与双击编辑，须经撤回或右键「编辑」。
 - 撤回即编辑：textarea 以 `defaultValue` 复原 userInput，Ctrl+Enter 保存、Esc 取消、Ctrl+Z 原生 redo。
+- 编辑框挂载与输入时按 `scrollHeight` 自动增高，上限 `EDITOR_MAX_H=360px`，超出转框内滚动；样式 `resize-none overflow-hidden`。
 - summary 标题行固定「📝 段摘要」，有箭头可折叠，map 中不独立渲染避免重复。
 - summary 生成指示由 `summaryStatus` 驱动而非内容是否为空；终态无内容显示「（空摘要）」。
 - summary 支持编辑与重新生成，`summaryEdited=true` 后 AI 重新生成不得覆盖。
@@ -58,6 +59,7 @@
 
 - remark-math 只认 `$`/`$$`。渲染前经 `normalizeMathDelimiters` 将 `\[...\]`→`$$...$$`、`\(...\)`→`$...$`，只匹配 `\` 前缀括号，不误伤 `[1]` 引用与 `\$` 转义。
 - 术语保护区域 `encodeFreeTerms.protectedRegions` 覆盖：markdown 链接、`$...$`/`$$...$$`/`\(...\)`/`\[...\]`、行内 code、代码块。公式定界符转义发生在渲染前归一化阶段，故 `\(...\)`/`\[...\]` 必须在注入阶段即纳入保护。
+- 术语聚焦由 `onTermClick` 单击触发：`window.getSelection()` 非折叠（拖选）时跳过，让位划词；双击术语因首击已聚焦，不再单独处理。
 
 ## 流式
 

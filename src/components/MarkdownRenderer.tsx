@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 import { TERM_EXPLICIT_START, TERM_EXPLICIT_END, TERM_FREE_START, TERM_FREE_END } from "@/services/termParser";
 
 export interface TermHandlers {
-  onTermDoubleClick?: (term: string) => void;
+  onTermClick?: (term: string) => void;
   onTermHover?: (e: React.MouseEvent, term: string) => void;
   onTermLeave?: () => void;
 }
@@ -48,8 +48,12 @@ function decodeSegment(text: string, handlers: TermHandlers, isCode: boolean): R
         <span
           key={key++}
           className="term-underline"
-          onDoubleClick={(e) => { e.stopPropagation(); handlers.onTermDoubleClick?.(term); }}
-          onClick={(e) => { if (e.ctrlKey || e.metaKey) { e.stopPropagation(); handlers.onTermDoubleClick?.(term); } }}
+          onClick={(e) => {
+            const sel = window.getSelection();
+            if (sel && !sel.isCollapsed) return;
+            e.stopPropagation();
+            handlers.onTermClick?.(term);
+          }}
           onMouseEnter={(e) => handlers.onTermHover?.(e, term)}
           onMouseLeave={() => handlers.onTermLeave?.()}
         >
@@ -97,11 +101,11 @@ function normalizeMathDelimiters(content: string): string {
 
 export function MarkdownRenderer({
   content, className, inline, onFileLink,
-  onTermDoubleClick, onTermHover, onTermLeave,
+  onTermClick, onTermHover, onTermLeave,
 }: MarkdownRendererProps) {
   const handlers = useMemo<TermHandlers>(
-    () => ({ onTermDoubleClick, onTermHover, onTermLeave }),
-    [onTermDoubleClick, onTermHover, onTermLeave]
+    () => ({ onTermClick, onTermHover, onTermLeave }),
+    [onTermClick, onTermHover, onTermLeave]
   );
 
   const comps = useMemo(() => {

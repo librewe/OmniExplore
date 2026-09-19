@@ -15,6 +15,13 @@ const STICKY_Z = 20;
 const STICKY_BG_SELECTED = "hsl(var(--accent))";
 /** 父链弱高亮背景：不透明极淡蓝（95% 背景色 + 5% primary，亮度高于选中行的 accent 底色），避免粘滞滚动时半透明透底 */
 const STICKY_BG_ANCESTOR = "color-mix(in srgb, hsl(var(--background)) 95%, hsl(var(--primary)) 5%)";
+const EDITOR_MAX_H = 360;
+
+function autoGrowTextarea(el: HTMLTextAreaElement) {
+  el.style.height = "auto";
+  el.style.height = `${Math.min(el.scrollHeight, EDITOR_MAX_H)}px`;
+  el.style.overflowY = el.scrollHeight > EDITOR_MAX_H ? "auto" : "hidden";
+}
 
 interface EntryRowProps {
   entry: Entry;
@@ -34,7 +41,7 @@ interface EntryRowProps {
   onEditSubmit: (session: Session, entry: Entry) => void;
   onEditingChange: (session: Session, entry: Entry, value: string) => void;
   onSelectionContextMenu: (selectedText: string, entry: Entry, rect: { left: number; bottom: number }) => void;
-  onTermDoubleClick: (term: string) => void;
+  onTermClick: (term: string) => void;
   onTermHover: (e: React.MouseEvent, term: string) => void;
   onTermLeave: () => void;
   onFileLink?: (filename: string) => void;
@@ -64,7 +71,7 @@ function EntryRow({
   entry, session, depth, isSelected, isAncestor, isEditing, isEditable, children,
   onToggleExpand, onSelect, onContextMenu, onFork,
   onEditEntry, onCopyEntry, onEditSubmit, onEditingChange,
-  onSelectionContextMenu, onTermDoubleClick, onTermHover, onTermLeave, onFileLink,
+  onSelectionContextMenu, onTermClick, onTermHover, onTermLeave, onFileLink,
   onEditSummary, onRegenerateSummary, stickyRankOffset,
 }: EntryRowProps) {
   const isSummary = entry.type === "summary";
@@ -115,11 +122,12 @@ function EntryRow({
     prevStreamingRef.current = isStreaming;
   }, [scrollCapped, isStreaming, entry, isExpanded]);
 
-  // 进入编辑态时把编辑框滚入视野（如新增上下文自动编辑）
+  // 进入编辑态时把编辑框按内容增高并滚入视野（如新增上下文自动编辑）
   useEffect(() => {
-    if (isEditing) {
-      textareaRef.current?.scrollIntoView({ block: "nearest" });
-    }
+    if (!isEditing) return;
+    const el = textareaRef.current;
+    if (el) autoGrowTextarea(el);
+    el?.scrollIntoView({ block: "nearest" });
   }, [isEditing]);
 
   const rowRank = depth * 2 - (stickyRankOffset ?? 0);
@@ -153,7 +161,8 @@ function EntryRow({
       <div className={cn("tree-node-row group flex items-start gap-1 py-0.5 rounded-md transition-colors cursor-default", isSummary ? "hover:bg-muted/50" : "tree-row-sticky-surface", isSelected && "tree-node-selected")}
         style={rowStyle}
         onClick={(e) => { e.stopPropagation(); onSelect(entry); }}
-        onDoubleClick={() => {
+        onDoubleClick={(e) => {
+          if ((e.target as HTMLElement).closest(".term-underline")) return;
           if (!entry.expanded) onToggleExpand(session, entry);
           if (isSummary && !summaryLoading) setEditingSummary(true);
           else if (isEditable) onEditEntry(session, entry);
@@ -195,8 +204,14 @@ function EntryRow({
           className={cn("ml-0 py-1 select-text", scrollCapped && "overflow-y-auto max-h-[60vh]", scrollCapped && boxOverflow && "entry-fade-mask")}
           style={{ paddingLeft: 20, paddingRight: 20 }}
           onScroll={scrollCapped ? (e) => rememberEntryScroll(entry, e.currentTarget.scrollTop) : undefined}
+          onDoubleClick={(e) => {
+            if ((e.target as HTMLElement).closest(".term-underline")) return;
+            if (isSummary && !summaryLoading) { setEditingSummary(true); return; }
+            if (isEditable) onEditEntry(session, entry);
+          }}
           onMouseUp={(e) => {
             if (e.button !== 0) return;
+            if (e.detail >= 2 && (isEditable || isSummary)) return;
             const sel = window.getSelection()?.toString().trim();
             if (sel) {
               const range = window.getSelection()?.getRangeAt(0);
@@ -216,15 +231,16 @@ function EntryRow({
                   if (e.key === "Escape") { onEditingChange(session, entry, entry.userInput); onEditSubmit(session, entry); }
                 }}
                 onFocus={(e) => { const el = e.target as HTMLTextAreaElement; el.setSelectionRange(el.value.length, el.value.length); }}
+                onInput={(e) => autoGrowTextarea(e.currentTarget)}
                 onBlur={(e) => { onEditingChange(session, entry, e.target.value); onEditSubmit(session, entry); }}
-                className="w-full min-h-[60px] rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring resize-y" placeholder="输入内容…" autoFocus />
+                className="w-full min-h-[60px] rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring resize-none overflow-hidden" placeholder="输入内容…" autoFocus />
               <p className="text-xs text-muted-foreground">Ctrl+Enter 保存，Esc 取消</p>
             </div>
           ) : (
             <>
               {entry.type !== "note" && entry.type !== "summary" && (
                 <div className="mb-1 rounded-lg bg-muted/50 px-3 py-1">
-                  <TermText content={entry.userInput} onTermDoubleClick={onTermDoubleClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-foreground" />
+                  <TermText content={entry.userInput} onTermClick={onTermClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-foreground" />
                 </div>
               )}
               {entry.reasoning ? (
@@ -239,7 +255,7 @@ function EntryRow({
                   </button>
                   {showReasoning && (
                     <div className="mt-1 rounded-lg border border-border/60 bg-muted/30 px-3 py-2">
-                      <TermText content={entry.reasoning} onTermDoubleClick={onTermDoubleClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-sm text-muted-foreground" />
+                      <TermText content={entry.reasoning} onTermClick={onTermClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-sm text-muted-foreground" />
                     </div>
                   )}
                 </div>
@@ -264,7 +280,7 @@ function EntryRow({
                   </div>
                 ) : entry.userInput ? (
                   <div className="flex items-start gap-1.5">
-                    <TermText content={entry.userInput} onTermDoubleClick={onTermDoubleClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-muted-foreground" />
+                    <TermText content={entry.userInput} onTermClick={onTermClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-muted-foreground" />
                     {summaryLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary shrink-0 mt-0.5" />}
                   </div>
                 ) : summaryLoading ? (
@@ -276,12 +292,12 @@ function EntryRow({
                   <div className="text-sm italic text-muted-foreground">（空摘要）</div>
                 )
               ) : entry.assistantOutput ? (
-                <TermText content={entry.assistantOutput} onTermDoubleClick={onTermDoubleClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-foreground" />
+                <TermText content={entry.assistantOutput} onTermClick={onTermClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-foreground" />
               ) : isStreaming ? (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <span className="flex gap-1"><span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot" /><span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot [animation-delay:0.2s]" /><span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse-dot [animation-delay:0.4s]" /></span>正在思考…</div>
               ) : entry.type === "note" ? (
-                <TermText content={entry.userInput} onTermDoubleClick={onTermDoubleClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-foreground" />
+                <TermText content={entry.userInput} onTermClick={onTermClick} onTermHover={onTermHover} onTermLeave={onTermLeave} onFileLink={onFileLink} className="text-base text-foreground" />
               ) : <span className="text-sm text-muted-foreground italic">点击展开以探索 →</span>}
               {entry.status === "error" && entry.errorMessage && <div className="text-xs text-destructive mt-1">{entry.errorMessage}</div>}
             </>
@@ -303,7 +319,7 @@ interface SharedHandlers {
   onSessionContextMenu: (e: React.MouseEvent, session: Session) => void;
   onEntryContextMenu: (e: React.MouseEvent, session: Session, entry: Entry) => void;
   onSelectionContextMenu: (selectedText: string, entry: Entry, rect: { left: number; bottom: number }) => void;
-  onTermDoubleClick: (term: string) => void;
+  onTermClick: (term: string) => void;
   onTermHover: (e: React.MouseEvent, term: string) => void;
   onTermLeave: () => void;
   onFileLink?: (filename: string) => void;
@@ -388,8 +404,7 @@ function SessionView({ session, depth, nodeTitle, ...rest }: SessionViewProps) {
         {!collapsed && session.entries.map((entry, idx) => {
           // summary 已作为 fork entry 的 nextSummary 提前渲染（子 Session 前），此处跳过避免重复
           if (entry.type === "summary") return null;
-          const isLast = idx === session.entries.length - 1;
-          const isEditable = isLast && !entry.assistantOutput;
+          const isEditable = entry.type === "note";
           // 段摘要紧跟 fork entry（数据层 splice(forkIdx+1)），渲染在子 Session 之前（一个段多个 fork 共用）
           const nextSummary = entry.children.length > 0 && session.entries[idx + 1]?.type === "summary"
             ? session.entries[idx + 1]
@@ -403,7 +418,7 @@ function SessionView({ session, depth, nodeTitle, ...rest }: SessionViewProps) {
             onContextMenu={rest.onEntryContextMenu} onFork={rest.onForkEntry}
             onEditEntry={rest.onEditEntry} onCopyEntry={rest.onCopyEntry} onEditSubmit={rest.onEditSubmit} onEditingChange={rest.onEditingChange}
             onSelectionContextMenu={rest.onSelectionContextMenu}
-            onTermDoubleClick={rest.onTermDoubleClick} onTermHover={rest.onTermHover} onTermLeave={rest.onTermLeave} onFileLink={rest.onFileLink}
+            onTermClick={rest.onTermClick} onTermHover={rest.onTermHover} onTermLeave={rest.onTermLeave} onFileLink={rest.onFileLink}
             onEditSummary={rest.onEditSummary} onRegenerateSummary={rest.onRegenerateSummary}
           >
             {entry.expanded && nextSummary && (
@@ -414,7 +429,7 @@ function SessionView({ session, depth, nodeTitle, ...rest }: SessionViewProps) {
                 onContextMenu={rest.onEntryContextMenu} onFork={rest.onForkEntry}
                 onEditEntry={rest.onEditEntry} onCopyEntry={rest.onCopyEntry} onEditSubmit={rest.onEditSubmit} onEditingChange={rest.onEditingChange}
                 onSelectionContextMenu={rest.onSelectionContextMenu}
-                onTermDoubleClick={rest.onTermDoubleClick} onTermHover={rest.onTermHover} onTermLeave={rest.onTermLeave} onFileLink={rest.onFileLink}
+                onTermClick={rest.onTermClick} onTermHover={rest.onTermHover} onTermLeave={rest.onTermLeave} onFileLink={rest.onFileLink}
                 onEditSummary={rest.onEditSummary} onRegenerateSummary={rest.onRegenerateSummary}
               />
             )}

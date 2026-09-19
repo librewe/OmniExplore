@@ -12,8 +12,13 @@ export function encodeTerms(text: string): string {
 function encodeFreeTerms(text: string, termList: string[]): string {
   if (!termList.length) return text;
   const sorted = [...termList].sort((a, b) => b.length - a.length);
-  const escaped = sorted.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const regex = new RegExp(`(${escaped.join("|")})`, "gi");
+  // 首尾均为 ASCII 词字符的术语要求词边界，避免 RL 命中 World 内部的 rl；
+  // 含 CJK 等非词字符的术语保持子串匹配（中文无词边界，必须子串命中）
+  const patterns = sorted.map((t) => {
+    const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return /^\w/.test(t) && /\w$/.test(t) ? `(?<!\\w)${escaped}(?!\\w)` : escaped;
+  });
+  const regex = new RegExp(`(${patterns.join("|")})`, "gi");
   const mdLinkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
 
   const protectedRegions: { start: number; end: number }[] = [];

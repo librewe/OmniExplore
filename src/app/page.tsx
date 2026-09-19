@@ -745,7 +745,6 @@ export default function Home() {
 
   const handleToggleEntryExpand = useCallback(async (session: Session, entry: Entry) => {
     entry.expanded = !entry.expanded;
-    session.updated_at = Date.now();
     await putNode(nodeRef.current!);
     dispatchNode({ type: "REPLACE_NODE", node: nodeRef.current! });
   }, []);
@@ -1960,7 +1959,7 @@ export default function Home() {
                         onToggleExpand={handleToggleEntryExpand} onSelect={handleSelectEntry}
                         onSessionContextMenu={handleSessionContextMenu} onEntryContextMenu={handleEntryContextMenu}
                         onSelectionContextMenu={handleSelectionContextMenu}
-                        onTermDoubleClick={handleFocusNode} onTermHover={handleTermHover} onTermLeave={handleTermLeave} onFileLink={handleFileLink}
+                        onTermClick={handleFocusNode} onTermHover={handleTermHover} onTermLeave={handleTermLeave} onFileLink={handleFileLink}
                         onPlusSelect={handlePlusSelect} onCreateEmptyEntry={handleCreateEmptyEntry}
                         onNodeFocus={(session, title) => {
                           setFillValue("");

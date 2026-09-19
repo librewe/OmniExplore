@@ -33,6 +33,7 @@ next-env.d.ts
 
 # draft / legacy
 .draft/
+doc/
 
 # data
 data/

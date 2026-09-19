@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 
 interface TermTextProps {
   content: string;
-  onTermDoubleClick?: (term: string) => void;
+  onTermClick?: (term: string) => void;
   onTermHover?: (e: React.MouseEvent, term: string) => void;
   onTermLeave?: () => void;
   onFileLink?: (filename: string) => void;
@@ -17,7 +17,7 @@ interface TermTextProps {
 
 export const TermText = memo(function TermText({
   content,
-  onTermDoubleClick,
+  onTermClick,
   onTermHover,
   onTermLeave,
   onFileLink,
@@ -32,7 +32,7 @@ export const TermText = memo(function TermText({
         content={encoded}
         inline
         onFileLink={onFileLink}
-        onTermDoubleClick={onTermDoubleClick}
+        onTermClick={onTermClick}
         onTermHover={onTermHover}
         onTermLeave={onTermLeave}
       />
